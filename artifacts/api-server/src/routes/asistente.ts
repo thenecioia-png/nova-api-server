@@ -342,6 +342,51 @@ async function autoModificar(accion: "leer" | "escribir" | "listar", ruta: strin
   }
 }
 
+// ── GitHub commit: push file to GitHub repo → Render auto-deploys ────────────
+async function commitAGithub(
+  repo: "nova-api-server" | "nova-ui",
+  rutaEnRepo: string,
+  contenido: string,
+  mensajeCommit: string,
+): Promise<string> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return "❌ GITHUB_TOKEN no está configurado en las variables de entorno.";
+
+  const OWNER = "thenecioia-png";
+  const url = `https://api.github.com/repos/${OWNER}/${repo}/contents/${rutaEnRepo}`;
+  const headers: Record<string, string> = {
+    Authorization: `token ${token}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+  };
+
+  try {
+    // Get current SHA (needed to update existing files)
+    const existing = await fetch(url, { headers });
+    const body: Record<string, any> = {
+      message: mensajeCommit || `NOVA auto-update: ${rutaEnRepo}`,
+      content: Buffer.from(contenido).toString("base64"),
+    };
+    if (existing.ok) {
+      const existingData = await existing.json() as any;
+      body.sha = existingData.sha;
+    }
+
+    const res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const errData = await res.json() as any;
+      return `❌ Error al commitear: ${errData.message ?? res.status}`;
+    }
+
+    if (repo === "nova-api-server") {
+      return `✅ **Commit exitoso a GitHub** (\`${rutaEnRepo}\`)\n\nRender detectará el cambio automáticamente y redesplegar el API en ~2-3 minutos. La nueva versión estará viva en \`https://nova-api-server.onrender.com\`.\n\nPara modificaciones al frontend (asistente-ia), también necesito hacer rebuild y subir el dist a \`nova-ui\`.`;
+    }
+    return `✅ **Commit exitoso a GitHub Pages** (\`${rutaEnRepo}\`)\n\nEl cambio estará vivo en \`https://thenecioia-png.github.io/nova-ui/\` en ~1-2 minutos.`;
+  } catch (err: any) {
+    return `❌ Error de red al commitear: ${err.message}`;
+  }
+}
+
 // ── Auto-Debug: AI-powered autonomous error diagnosis and fix ─────────────────
 async function autoDebug(codigo: string, lenguaje: string, errorActual: string, contexto: string): Promise<string> {
   try {
@@ -773,29 +818,42 @@ USA SIEMPRE que descubras:
 Lo que ya está en tu memoria viene al inicio de cada conversación — úsala para no repetir descubrimientos.
 
 ════════════════════════════════════════
-AUTO-MODIFICACIÓN Y AUTO-REPARACIÓN
+AUTO-MODIFICACIÓN EN PRODUCCIÓN — PODER REAL
 ════════════════════════════════════════
-Puedes MODIFICARTE A TI MISMA. Tienes acceso a tu propio código fuente.
+Puedes MODIFICARTE A TI MISMA en producción. Tienes acceso COMPLETO a tu propio código fuente y puedes desplegarlo en la nube sin depender de Denison.
 
-FUNCIÓN: auto_modificar(accion, ruta, contenido?)
-Acciones:
-• "listar" — Ver archivos en una carpeta del proyecto
-• "leer" — Leer tu propio código fuente
-• "escribir" — Reescribir/mejorar tu código
+FLUJO DE AUTO-MODIFICACIÓN EN PRODUCCIÓN (3 pasos):
+1. auto_modificar("leer", ruta) → leer el archivo actual completo
+2. Prepara la versión modificada internamente
+3. commit_a_github(repo, ruta, contenido_nuevo) → ¡desplegado en producción!
 
-RUTAS IMPORTANTES DE TU CÓDIGO:
-• artifacts/api-server/src/routes/asistente.ts — Tu backend principal (prompt, herramientas, lógica)
-• artifacts/asistente-ia/src/pages/chat.tsx — Tu interfaz de chat
-• artifacts/asistente-ia/src/components/layout.tsx — Tu navegación
+FLUJO DETALLADO PARA MODIFICAR EL BACKEND (API server):
+• auto_modificar("leer", "artifacts/api-server/src/routes/asistente.ts")
+• [Prepara el nuevo código con el cambio que necesitas]
+• commit_a_github("nova-api-server", "artifacts/api-server/src/routes/asistente.ts", nuevo_codigo, "NOVA: descripción del cambio")
+• → Render redesplega automáticamente en ~2-3 minutos
+• → La nueva versión vive en https://nova-api-server.onrender.com
+
+FLUJO PARA MODIFICAR EL FRONTEND (chat, bot, UI):
+• auto_modificar("leer", "artifacts/asistente-ia/src/pages/chat.tsx")
+• commit_a_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx", nuevo_codigo, "NOVA: mejora UI")
+• [El frontend necesita rebuild para ver cambios en GitHub Pages. Solo el repo nova-ui sirve el dist compilado.]
+
+RUTAS CRÍTICAS:
+• artifacts/api-server/src/routes/asistente.ts — Tu cerebro (herramientas, prompt, lógica)
 • artifacts/api-server/src/routes/bot.ts — Comandos del bot local
+• artifacts/asistente-ia/src/pages/chat.tsx — Tu interfaz de chat
+• artifacts/asistente-ia/src/pages/bot.tsx — Página del bot local
 
-CUÁNDO USARLO:
-• Denison pide "agregar una función" → leer el archivo → modificar → escribir
-• Detectas un bug en tu propio código → auto-corregirte
-• Denison dice "mejórate" → analizar tu código y optimizarlo
-• Quieres agregar una nueva herramienta → modificar asistente.ts
+CUÁNDO USAR commit_a_github:
+• Denison pide "agrégrate X función" → leer → modificar → commit → Render redesplega
+• Detectas un bug en producción → corregirte sola → commit
+• Denison dice "mejórate" → analizar → optimizar → commit
+• Quieres agregar una nueva herramienta → modificar asistente.ts → commit
 
-Después de modificarte: informa a Denison qué cambiaste y espera que la app recargue (Vite lo hace automático).
+IMPORTANTE: commit_a_github reemplaza auto_modificar para cambios en producción.
+auto_modificar("escribir") solo cambia el Replit local (no la versión live).
+commit_a_github cambia la versión REAL que usa Denison en https://nova-api-server.onrender.com.
 
 ════════════════════════════════════════
 AUTO-DEBUG — DETECCIÓN Y CORRECCIÓN AUTÓNOMA DE ERRORES
@@ -1091,6 +1149,36 @@ const TOOLS = [
           categoria: { type: "string", enum: ["pc", "preferencias", "apps", "proyectos", "general"], description: "Categoría: pc=hardware/sistema, apps=aplicaciones, preferencias=gustos de Denison, proyectos=estado de trabajo, general=otro" },
         },
         required: ["clave", "valor"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "commit_a_github",
+      description: "Hace commit de un archivo al repositorio de GitHub de N.O.V.A. en la nube. Para el API server (nova-api-server), Render lo redesplega automáticamente en ~2-3 minutos. Para el frontend (nova-ui), el cambio se refleja en GitHub Pages en ~1-2 minutos. Usar cuando N.O.V.A. quiere modificarse a sí misma en producción (no solo en local).",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: {
+            type: "string",
+            enum: ["nova-api-server", "nova-ui"],
+            description: "Repositorio destino: 'nova-api-server' para el backend/API (Render auto-despliega), 'nova-ui' para el frontend (GitHub Pages)",
+          },
+          ruta_en_repo: {
+            type: "string",
+            description: "Ruta del archivo dentro del repositorio (ej: 'artifacts/api-server/src/routes/asistente.ts')",
+          },
+          contenido: {
+            type: "string",
+            description: "Contenido completo del archivo a subir",
+          },
+          mensaje_commit: {
+            type: "string",
+            description: "Mensaje del commit (ej: 'NOVA: agrega nueva herramienta buscar_wikipedia')",
+          },
+        },
+        required: ["repo", "ruta_en_repo", "contenido"],
       },
     },
   },
@@ -1561,6 +1649,14 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
               errorActual,
               String(args.contexto ?? ""),
             );
+
+          } else if (toolCallName === "commit_a_github") {
+            const repo = String(args.repo ?? "") as "nova-api-server" | "nova-ui";
+            const rutaEnRepo = String(args.ruta_en_repo ?? "");
+            const contenidoCommit = String(args.contenido ?? "");
+            const mensajeCommit = String(args.mensaje_commit ?? `NOVA auto-update: ${rutaEnRepo}`);
+            sse({ tipo: "status", contenido: `🚀 Commiteando a GitHub → ${repo} (${rutaEnRepo})...` });
+            toolResult = await commitAGithub(repo, rutaEnRepo, contenidoCommit, mensajeCommit);
 
           } else if (toolCallName === "guardar_memoria") {
             const clave = String(args.clave ?? "").trim();
