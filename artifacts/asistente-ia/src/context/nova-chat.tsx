@@ -15,7 +15,7 @@ export type LocalMessage = {
   rol: "user" | "assistant" | "system";
   contenido: string;
   imageUrl?: string;
-  tipo?: "normal" | "status" | "bot-resultado" | "vision";
+  tipo?: "normal" | "bot-resultado" | "vision";
 };
 
 export type SessionMeta = {
@@ -47,6 +47,7 @@ interface NovaChatContextValue {
   localMessages: LocalMessage[];
   setLocalMessages: React.Dispatch<React.SetStateAction<LocalMessage[]>>;
   isStreaming: boolean;
+  streamingStatus: string | null;
   sessionId: string;
   sessions: SessionMeta[];
   botOnline: boolean;
@@ -81,6 +82,7 @@ const NovaChatContext = createContext<NovaChatContextValue | null>(null);
 export function NovaChatProvider({ children }: { children: ReactNode }) {
   const [localMessages, setLocalMessages] = useState<LocalMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>(initSessionId);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [botOnline, setBotOnline] = useState(false);
@@ -102,6 +104,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     abortRef.current?.abort();
     streamingRef.current = false;
     setIsStreaming(false);
+    setStreamingStatus(null);
     setLocalMessages(prev => {
       const copy = [...prev];
       const last = copy[copy.length - 1];
@@ -116,9 +119,6 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── IMPORTANT: abortRef is NOT cleaned up on unmount ─────────────────────────
-  // This is intentional — the stream continues even when ChatPage unmounts.
-  // It is only aborted when: new chat, session switch, or new sendMessage call.
   const abortRef = useRef<AbortController | null>(null);
   const streamingRef = useRef(false);
 
@@ -164,7 +164,6 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     } catch { /* silent */ }
   }, []);
 
-  // ── Load messages when session changes ────────────────────────────────────
   useEffect(() => {
     setLocalMessages([]);
     loadSessionMessages(sessionId);
@@ -229,7 +228,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(poll);
   }, [botResultsQueue]);
 
-  // ── Core sendMessage — SSE stream. NOT cancelled on page navigation ────────
+  // ── Core sendMessage — SSE stream ─────────────────────────────────────────
   const sendMessage = useCallback(async (
     msg: string,
     fileBase64?: string,
@@ -243,31 +242,27 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     setLocalMessages(prev => [...prev, { rol: "user", contenido: userText }]);
     setLocalMessages(prev => [...prev, { rol: "assistant", contenido: "" }]);
     setIsStreaming(true);
+    setStreamingStatus(null);
     streamingRef.current = true;
 
     const reglas = reglasData?.reglas.filter(r => r.activa).map(r => r.descripcion) ?? [];
     const memoria = memoriaData?.memoria.map(m => `${m.clave}: ${m.valor}`) ?? [];
 
-    // Use a local copy of messages at time of send (before we add placeholders above)
-    // We'll re-read from the actual messages state in the closure
     const historial = localMessages
       .filter(m => !m.tipo || m.tipo === "normal")
       .slice(-20)
       .map(m => ({ rol: m.rol === "user" ? "usuario" : "assistant", contenido: m.contenido }));
 
-    // Abort previous stream if any, then start new one
     abortRef.current?.abort();
     const abortCtrl = new AbortController();
     abortRef.current = abortCtrl;
 
-    // Snapshot the current sessionId
     const currentSessionId = sessionId;
 
     try {
       const response = await fetch(`${BASE}/api/asistente/ia`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // ⚠️ NO signal passed — stream is NOT bound to component lifecycle
         body: JSON.stringify({
           mensaje: msg,
           historial,
@@ -303,20 +298,11 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
         });
       };
 
-      const addStatusMsg = (contenido: string) => {
-        setLocalMessages(prev => {
-          const copy = [...prev];
-          copy.splice(copy.length - 1, 0, { rol: "assistant", contenido, tipo: "status" });
-          return copy;
-        });
-      };
-
       const exitStream = () => {
         clearTimeout(timeoutId);
         reader.cancel("exit").catch(() => {});
       };
 
-      // Listen for abort signal to cancel the reader
       abortCtrl.signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reader.cancel("aborted").catch(() => {});
@@ -340,11 +326,13 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
                 resetTimeout();
               } else if (event.tipo === "token") {
                 accText += event.contenido;
+                setStreamingStatus(null);
                 updateLastMsg(accText);
               } else if (event.tipo === "status") {
-                addStatusMsg(event.contenido);
+                setStreamingStatus(event.contenido);
               } else if (event.tipo === "done") {
                 const finalText = event.respuesta ?? accText;
+                setStreamingStatus(null);
                 updateLastMsg(finalText, { imageUrl: event.imageUrl ?? undefined });
                 speakFn?.(finalText);
 
@@ -358,6 +346,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
                 exitStream();
                 return;
               } else if (event.tipo === "error") {
+                setStreamingStatus(null);
                 updateLastMsg(`❌ ${event.contenido}`);
                 exitStream();
                 return;
@@ -383,6 +372,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     } finally {
       streamingRef.current = false;
       setIsStreaming(false);
+      setStreamingStatus(null);
       loadSessionMessages(currentSessionId);
     }
   }, [isStreaming, reglasData, memoriaData, localMessages, botOnline, sessionId, loadSessionMessages]);
@@ -396,6 +386,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     setSessionId(newId);
     setLocalMessages([]);
     setIsStreaming(false);
+    setStreamingStatus(null);
   }, []);
 
   const handleSwitchSession = useCallback((sid: string, onDone?: () => void) => {
@@ -405,6 +396,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
     setSessionId(sid);
     setLocalMessages([]);
     setIsStreaming(false);
+    setStreamingStatus(null);
     onDone?.();
   }, []);
 
@@ -426,7 +418,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
   return (
     <NovaChatContext.Provider value={{
       localMessages, setLocalMessages,
-      isStreaming, sessionId, sessions,
+      isStreaming, streamingStatus, sessionId, sessions,
       botOnline, botResultsQueue, setBotResultsQueue,
       selfRepairActive, toggleSelfRepair,
       sendMessage, pauseStream,
