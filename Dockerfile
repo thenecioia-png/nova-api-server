@@ -10,7 +10,7 @@ COPY lib/db/package.json ./lib/db/
 COPY lib/integrations-openai-ai-server/package.json ./lib/integrations-openai-ai-server/
 COPY lib/api-zod/package.json ./lib/api-zod/
 
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 COPY artifacts/api-server ./artifacts/api-server
 COPY lib/db ./lib/db
