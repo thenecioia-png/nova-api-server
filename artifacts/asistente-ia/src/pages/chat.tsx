@@ -33,7 +33,7 @@ export default function ChatPage() {
 
   // ── Global AI state from context (persists across page navigation) ────────
   const {
-    localMessages, isStreaming, sessionId,
+    localMessages, isStreaming, streamingStatus, sessionId,
     sessions, botOnline,
     sendMessage, pauseStream, loadSessions, handleNuevoChat,
     handleSwitchSession, handleEliminarSesion, handleEliminarChat,
@@ -344,6 +344,7 @@ export default function ChatPage() {
               </div>
             </div>
           ) : (
+            <>
             <AnimatePresence initial={false}>
               {localMessages.map((msg, idx) => (
                 <motion.div
@@ -357,13 +358,11 @@ export default function ChatPage() {
                     "max-w-[88%] md:max-w-[78%] rounded-2xl p-4 shadow-lg",
                     msg.rol === "user"
                       ? "bg-primary/10 border border-primary/30 text-primary-foreground backdrop-blur-md rounded-br-sm"
-                      : msg.tipo === "status"
-                        ? "bg-cyan-950/20 border border-cyan-400/15 text-cyan-200/70 text-[11px] font-mono py-1.5 px-3 rounded-lg flex items-center gap-2 max-w-full"
-                        : msg.tipo === "bot-resultado"
-                          ? "bg-cyan-950/40 border border-cyan-500/20 text-card-foreground rounded-bl-sm"
-                          : "bg-card border border-white/5 text-card-foreground rounded-bl-sm"
+                      : msg.tipo === "bot-resultado"
+                        ? "bg-cyan-950/40 border border-cyan-500/20 text-card-foreground rounded-bl-sm"
+                        : "bg-card border border-white/5 text-card-foreground rounded-bl-sm"
                   )}>
-                    {msg.rol === "assistant" && msg.tipo !== "status" && (
+                    {msg.rol === "assistant" && (
                       <div className="flex items-center gap-2 mb-2">
                         {msg.tipo === "bot-resultado"
                           ? <><Cpu className="w-3 h-3 text-cyan-400" /><span className="text-[10px] font-mono text-cyan-400/70 uppercase tracking-wider">BOT_RESULTADO</span></>
@@ -372,8 +371,6 @@ export default function ChatPage() {
                       </div>
                     )}
 
-                    {msg.tipo === "status" && <Loader2 className="w-3 h-3 animate-spin shrink-0" />}
-
                     {msg.imageUrl && (
                       <div className="mb-3 rounded-xl overflow-hidden border border-white/10">
                         <img src={msg.imageUrl} alt="Imagen generada" className="w-full max-w-lg rounded-xl" />
@@ -381,14 +378,8 @@ export default function ChatPage() {
                     )}
 
                     {msg.contenido && (
-                      <div className={cn(
-                        "prose prose-sm max-w-none",
-                        msg.rol === "user" ? "prose-invert text-foreground" : "prose-invert",
-                        msg.tipo === "status" && "not-prose text-[11px] text-cyan-200/70"
-                      )}>
-                        {msg.tipo === "status" ? msg.contenido : (
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.contenido}</ReactMarkdown>
-                        )}
+                      <div className={cn("prose prose-sm max-w-none", msg.rol === "user" ? "prose-invert text-foreground" : "prose-invert")}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.contenido}</ReactMarkdown>
                       </div>
                     )}
 
@@ -399,6 +390,26 @@ export default function ChatPage() {
                 </motion.div>
               ))}
             </AnimatePresence>
+
+            {/* ── Indicador de status flotante — aparece y desaparece ──────── */}
+            <AnimatePresence>
+              {streamingStatus && (
+                <motion.div
+                  key="status-indicator"
+                  initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                  transition={{ duration: 0.18 }}
+                  className="flex justify-start"
+                >
+                  <div className="flex items-center gap-2 bg-cyan-950/30 border border-cyan-400/20 text-cyan-200/80 text-[11px] font-mono py-1.5 px-3 rounded-full">
+                    <Loader2 className="w-3 h-3 animate-spin shrink-0 text-cyan-400" />
+                    <span>{streamingStatus}</span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+            </>
           )}
           <div ref={messagesEndRef} className="h-4" />
         </div>
