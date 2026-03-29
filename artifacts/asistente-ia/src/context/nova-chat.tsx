@@ -101,6 +101,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
 
   const pauseStream = useCallback(() => {
     if (!streamingRef.current) return;
+    userPausedRef.current = true; // flag to skip server reload in finally
     abortRef.current?.abort();
     streamingRef.current = false;
     setIsStreaming(false);
@@ -121,6 +122,7 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
 
   const abortRef = useRef<AbortController | null>(null);
   const streamingRef = useRef(false);
+  const userPausedRef = useRef(false); // true when user manually paused — skip server reload
 
   const { data: reglasData } = useReglas();
   const { data: memoriaData } = useMemoria();
@@ -373,7 +375,12 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
       streamingRef.current = false;
       setIsStreaming(false);
       setStreamingStatus(null);
-      loadSessionMessages(currentSessionId);
+      // Don't reload from server if user manually paused — it would erase
+      // the streamed text and pause marker still visible on screen.
+      if (!userPausedRef.current) {
+        loadSessionMessages(currentSessionId);
+      }
+      userPausedRef.current = false; // reset flag for next message
     }
   }, [isStreaming, reglasData, memoriaData, localMessages, botOnline, sessionId, loadSessionMessages]);
 
