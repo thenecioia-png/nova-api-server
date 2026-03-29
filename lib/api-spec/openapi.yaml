@@ -1,0 +1,339 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: API specification para Asistente IA
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: asistente
+    description: Operaciones del asistente IA
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /asistente/reglas:
+    get:
+      operationId: obtenerReglas
+      tags: [asistente]
+      summary: Obtener reglas del asistente
+      responses:
+        "200":
+          description: Lista de reglas
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReglasList"
+    post:
+      operationId: crearRegla
+      tags: [asistente]
+      summary: Crear nueva regla
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReglaInput"
+      responses:
+        "201":
+          description: Regla creada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Regla"
+  /asistente/reglas/{id}:
+    delete:
+      operationId: eliminarRegla
+      tags: [asistente]
+      summary: Eliminar regla
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Regla eliminada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MensajeRespuesta"
+  /asistente/memoria:
+    get:
+      operationId: obtenerMemoria
+      tags: [asistente]
+      summary: Obtener memoria del asistente
+      responses:
+        "200":
+          description: Entradas de memoria
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoriaList"
+    post:
+      operationId: guardarMemoria
+      tags: [asistente]
+      summary: Guardar en memoria
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoriaInput"
+      responses:
+        "201":
+          description: Guardado en memoria
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Memoria"
+  /asistente/memoria/{id}:
+    delete:
+      operationId: eliminarMemoria
+      tags: [asistente]
+      summary: Eliminar entrada de memoria
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Memoria eliminada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MensajeRespuesta"
+  /asistente/historial:
+    get:
+      operationId: obtenerHistorial
+      tags: [asistente]
+      summary: Obtener historial de conversaciones
+      responses:
+        "200":
+          description: Historial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistorialList"
+    post:
+      operationId: guardarHistorial
+      tags: [asistente]
+      summary: Guardar mensaje en historial
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HistorialInput"
+      responses:
+        "201":
+          description: Guardado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Historial"
+  /asistente/ia:
+    post:
+      operationId: procesarIA
+      tags: [asistente]
+      summary: Procesar mensaje con IA
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IAInput"
+      responses:
+        "200":
+          description: Respuesta de la IA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IARespuesta"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    MensajeRespuesta:
+      type: object
+      properties:
+        mensaje:
+          type: string
+      required:
+        - mensaje
+    Regla:
+      type: object
+      properties:
+        id:
+          type: integer
+        titulo:
+          type: string
+        descripcion:
+          type: string
+        activa:
+          type: boolean
+        creadaEn:
+          type: string
+          format: date-time
+      required:
+        - id
+        - titulo
+        - descripcion
+        - activa
+        - creadaEn
+    ReglaInput:
+      type: object
+      properties:
+        titulo:
+          type: string
+        descripcion:
+          type: string
+      required:
+        - titulo
+        - descripcion
+    ReglasList:
+      type: object
+      properties:
+        reglas:
+          type: array
+          items:
+            $ref: "#/components/schemas/Regla"
+      required:
+        - reglas
+    Memoria:
+      type: object
+      properties:
+        id:
+          type: integer
+        clave:
+          type: string
+        valor:
+          type: string
+        categoria:
+          type: string
+        creadaEn:
+          type: string
+          format: date-time
+      required:
+        - id
+        - clave
+        - valor
+        - categoria
+        - creadaEn
+    MemoriaInput:
+      type: object
+      properties:
+        clave:
+          type: string
+        valor:
+          type: string
+        categoria:
+          type: string
+      required:
+        - clave
+        - valor
+        - categoria
+    MemoriaList:
+      type: object
+      properties:
+        memoria:
+          type: array
+          items:
+            $ref: "#/components/schemas/Memoria"
+      required:
+        - memoria
+    Historial:
+      type: object
+      properties:
+        id:
+          type: integer
+        rol:
+          type: string
+        contenido:
+          type: string
+        creadoEn:
+          type: string
+          format: date-time
+      required:
+        - id
+        - rol
+        - contenido
+        - creadoEn
+    HistorialInput:
+      type: object
+      properties:
+        rol:
+          type: string
+        contenido:
+          type: string
+      required:
+        - rol
+        - contenido
+    HistorialList:
+      type: object
+      properties:
+        historial:
+          type: array
+          items:
+            $ref: "#/components/schemas/Historial"
+      required:
+        - historial
+    IAInput:
+      type: object
+      properties:
+        mensaje:
+          type: string
+        historial:
+          type: array
+          items:
+            type: object
+            properties:
+              rol:
+                type: string
+              contenido:
+                type: string
+            required:
+              - rol
+              - contenido
+        reglas:
+          type: array
+          items:
+            type: string
+        memoria:
+          type: array
+          items:
+            type: string
+      required:
+        - mensaje
+    IARespuesta:
+      type: object
+      properties:
+        respuesta:
+          type: string
+        accion:
+          type: string
+        datos:
+          type: object
+      required:
+        - respuesta
