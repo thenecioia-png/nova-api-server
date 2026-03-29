@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Mic, MicOff, Volume2, VolumeX, Terminal, Bot, Paperclip, X, Loader2, Search, Image as ImageIcon, Cpu, Plus, Trash2, AlertTriangle, Monitor, MessageSquare, Clock } from "lucide-react";
+import { Send, Mic, MicOff, Volume2, VolumeX, Terminal, Bot, Paperclip, X, Loader2, Search, Image as ImageIcon, Cpu, Plus, Trash2, AlertTriangle, Monitor, MessageSquare, Clock, Pause, XCircle, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { motion, AnimatePresence } from "framer-motion";
@@ -35,9 +35,17 @@ export default function ChatPage() {
   const {
     localMessages, isStreaming, sessionId,
     sessions, botOnline,
-    sendMessage, loadSessions, handleNuevoChat,
+    sendMessage, pauseStream, loadSessions, handleNuevoChat,
     handleSwitchSession, handleEliminarSesion, handleEliminarChat,
+    selfRepairActive, toggleSelfRepair,
   } = useNovaChat();
+
+  const abandonarMision = useCallback(() => {
+    pauseStream();
+    // Remove last empty/partial assistant message if it's just whitespace
+    // (pauseStream already appended the pause marker, but if user wants
+    //  to fully abort, we replace it with the abandon message)
+  }, [pauseStream]);
 
   // ── Voice ─────────────────────────────────────────────────────────────────
   const { isListening, toggleListening, speak, voiceEnabled, toggleVoice, supported: voiceSupported } = useVoice({
@@ -231,6 +239,22 @@ export default function ChatPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Self-repair badge */}
+            <button
+              onClick={toggleSelfRepair}
+              title={selfRepairActive ? "Auto-reparación activa — click para desactivar" : "Auto-reparación inactiva — click para activar"}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all",
+                selfRepairActive
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                  : "bg-gray-800/50 border-gray-700 text-gray-600"
+              )}
+            >
+              <Wrench className="w-3 h-3" />
+              <span className={cn("w-1.5 h-1.5 rounded-full", selfRepairActive ? "bg-emerald-400 animate-pulse" : "bg-gray-600")} />
+              {selfRepairActive ? "AUTO-FIX" : "FIX OFF"}
+            </button>
+
             {/* Bot status */}
             <div className={cn(
               "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold border transition-all",
@@ -394,6 +418,35 @@ export default function ChatPage() {
             </div>
           </div>
         )}
+
+        {/* ── Streaming action buttons ─────────────────────────────────────── */}
+        <AnimatePresence>
+          {isStreaming && (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              className="flex justify-center gap-3 px-4 pb-2"
+            >
+              <button
+                type="button"
+                onClick={pauseStream}
+                className="flex items-center gap-2 px-4 py-2 rounded-full bg-yellow-500/15 border border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/25 text-xs font-medium transition-all"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                Pausar
+              </button>
+              <button
+                type="button"
+                onClick={abandonarMision}
+                className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/15 border border-red-500/40 text-red-400 hover:bg-red-500/25 text-xs font-medium transition-all"
+              >
+                <XCircle className="w-3.5 h-3.5" />
+                Abandonar misión
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* ── Input area ───────────────────────────────────────────────────── */}
         <div className="p-4 md:p-5 bg-background/80 backdrop-blur-xl border-t border-border/50 shrink-0 z-20">
