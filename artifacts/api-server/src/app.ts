@@ -29,6 +29,10 @@ app.use(cors());
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
+app.get("/nova_bot.py", (_req, res) => {
+  res.redirect(301, "https://thenecioia-png.github.io/nova-ui/nova_bot.py");
+});
+
 app.use("/api", router);
 
 export default app;
