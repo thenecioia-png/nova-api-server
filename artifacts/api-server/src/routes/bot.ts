@@ -130,6 +130,21 @@ router.get("/bot/last-screenshot", (req, res) => {
   res.sendFile(SCREENSHOT_PATH);
 });
 
+// ─── Cancel all pending commands (Abandonar misión) ───────────────────────
+
+router.delete("/bot/commands/pendientes", async (_req, res) => {
+  try {
+    await db
+      .update(botCommandsTable)
+      .set({ estado: "error", resultado: { error: "Misión abandonada por el usuario" } as any })
+      .where(eq(botCommandsTable.estado, "pendiente"));
+    res.json({ ok: true, mensaje: "Todos los comandos pendientes cancelados." });
+  } catch (err) {
+    req.log?.error?.({ err }, "Error cancelando comandos");
+    res.status(500).json({ error: "Error interno" });
+  }
+});
+
 // ─── Web creates a command for the bot ────────────────────────────────────
 
 router.post("/bot/commands", async (req, res) => {
