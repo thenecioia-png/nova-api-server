@@ -1,13 +1,15 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import {
   Cpu, WifiOff, Key, Copy, Check, Play, RefreshCw,
   Terminal, CheckCircle, XCircle, Clock, Loader2,
   Monitor, Mouse, Keyboard, Camera, FolderOpen, Zap, Bot,
+  Pause, Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 import { API_BASE } from "@/lib/api-url";
+import { useNovaChat } from "@/context/nova-chat";
 const BASE = API_BASE;
 
 // Derive public server URL
@@ -64,6 +66,10 @@ export default function BotPage() {
   const [payloadEdit, setPayloadEdit] = useState("{}");
   const [tipoSel, setTipoSel]         = useState(TIPOS_RAPIDOS[0]);
   const [payloadErr, setPayloadErr]   = useState(false);
+  const [botPaused, setBotPaused]     = useState(false);
+  const [abandonando, setAbandonando] = useState(false);
+  const pollingPausedRef              = useRef(false);
+  const { selfRepairActive, toggleSelfRepair } = useNovaChat();
   const serverUrl = getServerUrl();
   const screenshotUrl = `${BASE}/api/bot/last-screenshot?ts=${screenshotTs}`;
 
@@ -134,9 +140,29 @@ export default function BotPage() {
   useEffect(() => {
     fetchStatus();
     fetchCommands();
-    const id = setInterval(() => { fetchStatus(); fetchCommands(); }, 4000);
+    const id = setInterval(() => {
+      if (!pollingPausedRef.current) { fetchStatus(); fetchCommands(); }
+    }, 4000);
     return () => clearInterval(id);
   }, [fetchStatus, fetchCommands]);
+
+  const togglePauseBot = useCallback(() => {
+    setBotPaused(prev => {
+      const next = !prev;
+      pollingPausedRef.current = next;
+      if (!next) { fetchStatus(); fetchCommands(); }
+      return next;
+    });
+  }, [fetchStatus, fetchCommands]);
+
+  const abandonarMisionBot = useCallback(async () => {
+    setAbandonando(true);
+    try {
+      await fetch(`${BASE}/api/bot/commands/pendientes`, { method: "DELETE" });
+      setTimeout(fetchCommands, 500);
+    } catch {}
+    setAbandonando(false);
+  }, [fetchCommands]);
 
   useEffect(() => {
     setPayloadEdit(JSON.stringify(tipoSel.payload ?? {}, null, 2));
@@ -192,7 +218,50 @@ export default function BotPage() {
             <h1 className="text-xl font-bold text-white tracking-wide">BOT LOCAL</h1>
             <p className="text-xs text-gray-500">N.O.V.A controla tu PC a través del agente local</p>
           </div>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
+            {/* Self-repair badge */}
+            <button
+              onClick={toggleSelfRepair}
+              title={selfRepairActive ? "Auto-reparación activa — click para desactivar" : "Activar auto-reparación"}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-semibold border transition-all",
+                selfRepairActive
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                  : "bg-gray-800/50 border-gray-700 text-gray-500"
+              )}
+            >
+              <Wrench className="w-3 h-3" />
+              <span className={cn("w-1.5 h-1.5 rounded-full", selfRepairActive ? "bg-emerald-400 animate-pulse" : "bg-gray-600")} />
+              {selfRepairActive ? "AUTO-FIX" : "FIX OFF"}
+            </button>
+
+            {/* Pause polling */}
+            <button
+              onClick={togglePauseBot}
+              title={botPaused ? "Reanudar monitoreo del bot" : "Pausar monitoreo del bot"}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-semibold border transition-all",
+                botPaused
+                  ? "bg-yellow-500/15 border-yellow-500/40 text-yellow-400"
+                  : "bg-white/5 border-white/10 text-gray-400 hover:border-yellow-500/30 hover:text-yellow-400"
+              )}
+            >
+              <Pause className="w-3 h-3" />
+              {botPaused ? "PAUSADO" : "PAUSAR"}
+            </button>
+
+            {/* Abandon mission */}
+            <button
+              onClick={abandonarMisionBot}
+              disabled={abandonando}
+              title="Cancelar todos los comandos pendientes"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-semibold border bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20 transition-all disabled:opacity-50"
+            >
+              {abandonando ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
+              ABANDONAR MISIÓN
+            </button>
+
+            {/* Status & refresh */}
             {botOnline ? (
               <span className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold">
                 <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
