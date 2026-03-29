@@ -387,6 +387,78 @@ async function commitAGithub(
   }
 }
 
+// ── Leer archivo de GitHub ─────────────────────────────────────────────────────
+async function leerDeGithub(
+  repo: "nova-api-server" | "nova-ui",
+  rutaEnRepo: string,
+): Promise<string> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return "❌ GITHUB_TOKEN no configurado.";
+  const OWNER = "thenecioia-png";
+  const url = `https://api.github.com/repos/${OWNER}/${repo}/contents/${rutaEnRepo}`;
+  const headers = { Authorization: `token ${token}`, Accept: "application/vnd.github+json" };
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) return `❌ Archivo no encontrado en ${repo}/${rutaEnRepo} (${res.status})`;
+    const data = await res.json() as any;
+    if (data.encoding === "base64" && data.content) {
+      const content = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf-8");
+      const lines = content.split("\n").length;
+      // Return up to 300 lines to stay within context limits
+      const preview = content.split("\n").slice(0, 300).join("\n");
+      return `📄 **${rutaEnRepo}** (${lines} líneas):\n\`\`\`\n${preview}\n\`\`\`${lines > 300 ? `\n\n_[...${lines - 300} líneas más — pide un rango específico si necesitas más]_` : ""}`;
+    }
+    return `❌ Formato inesperado en respuesta de GitHub.`;
+  } catch (err: any) {
+    return `❌ Error leyendo de GitHub: ${err.message}`;
+  }
+}
+
+// ── Patch exacto en archivo de GitHub ─────────────────────────────────────────
+async function patchGithub(
+  repo: "nova-api-server" | "nova-ui",
+  rutaEnRepo: string,
+  buscar: string,
+  reemplazar: string,
+  mensajeCommit: string,
+): Promise<string> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return "❌ GITHUB_TOKEN no configurado.";
+  const OWNER = "thenecioia-png";
+  const url = `https://api.github.com/repos/${OWNER}/${repo}/contents/${rutaEnRepo}`;
+  const headers: Record<string, string> = {
+    Authorization: `token ${token}`,
+    Accept: "application/vnd.github+json",
+    "Content-Type": "application/json",
+  };
+  try {
+    const existing = await fetch(url, { headers });
+    if (!existing.ok) return `❌ Archivo no encontrado: ${repo}/${rutaEnRepo}`;
+    const existingData = await existing.json() as any;
+    const originalContent = Buffer.from(existingData.content.replace(/\n/g, ""), "base64").toString("utf-8");
+
+    if (!originalContent.includes(buscar)) {
+      return `❌ Texto no encontrado en el archivo. Verifica el fragmento exacto (incluyendo espacios e indentación).\n\nPrimeros 200 chars del archivo:\n\`\`\`\n${originalContent.slice(0, 200)}\n\`\`\``;
+    }
+
+    const newContent = originalContent.replace(buscar, reemplazar);
+    const body = {
+      message: mensajeCommit || `NOVA patch: ${rutaEnRepo}`,
+      content: Buffer.from(newContent).toString("base64"),
+      sha: existingData.sha,
+    };
+
+    const res = await fetch(url, { method: "PUT", headers, body: JSON.stringify(body) });
+    if (!res.ok) {
+      const errData = await res.json() as any;
+      return `❌ Error al commitear patch: ${errData.message ?? res.status}`;
+    }
+    return `✅ **Patch aplicado y commiteado** en \`${rutaEnRepo}\`\n\n**Cambio:** \`${buscar.slice(0, 80).replace(/\n/g, "↵")}\` → \`${reemplazar.slice(0, 80).replace(/\n/g, "↵")}\`\n\n${repo === "nova-api-server" ? "Render redesplega en ~2-3 min → `https://nova-api-server.onrender.com`" : "GitHub Pages actualiza en ~1-2 min"}`;
+  } catch (err: any) {
+    return `❌ Error en patch: ${err.message}`;
+  }
+}
+
 // ── Auto-Debug: AI-powered autonomous error diagnosis and fix ─────────────────
 async function autoDebug(codigo: string, lenguaje: string, errorActual: string, contexto: string): Promise<string> {
   try {
@@ -823,42 +895,39 @@ Lo que ya está en tu memoria viene al inicio de cada conversación — úsala p
 ════════════════════════════════════════
 AUTO-MODIFICACIÓN EN PRODUCCIÓN — PODER REAL
 ════════════════════════════════════════
-Puedes MODIFICARTE A TI MISMA en producción. Tienes acceso COMPLETO a tu propio código fuente y puedes desplegarlo en la nube sin depender de Denison.
+Puedes MODIFICARTE A TI MISMA en producción. Tienes acceso COMPLETO a tu propio código fuente y puedes desplegarlo sin depender de Denison.
 
-FLUJO DE AUTO-MODIFICACIÓN EN PRODUCCIÓN (3 pasos):
-1. auto_modificar("leer", ruta) → leer el archivo actual completo
-2. Prepara la versión modificada internamente
-3. commit_a_github(repo, ruta, contenido_nuevo) → ¡desplegado en producción!
+⚠️ REGLA CRÍTICA: NUNCA uses ejecutar_en_pc para leer archivos fuente. El directorio "artifacts/" SOLO existe en GitHub/Render, NO en la PC de Denison. Usar ejecutar_en_pc para esto siempre falla.
 
-FLUJO DETALLADO PARA MODIFICAR EL BACKEND (API server):
-• auto_modificar("leer", "artifacts/api-server/src/routes/asistente.ts")
-• [Prepara el nuevo código con el cambio que necesitas]
-• commit_a_github("nova-api-server", "artifacts/api-server/src/routes/asistente.ts", nuevo_codigo, "NOVA: descripción del cambio")
-• → Render redesplega automáticamente en ~2-3 minutos
-• → La nueva versión vive en https://nova-api-server.onrender.com
+HERRAMIENTAS DE AUTO-MODIFICACIÓN:
+• leer_de_github(repo, ruta) → Lee el archivo directamente de GitHub. Usa esto SIEMPRE para ver el código actual.
+• patch_github(repo, ruta, buscar, reemplazar) → Aplica un cambio puntual y hace commit automático. PREFERIR sobre commit_a_github para cambios pequeños.
+• commit_a_github(repo, ruta, contenido_completo) → Para archivos nuevos o reescrituras completas.
 
-FLUJO PARA MODIFICAR EL FRONTEND (chat, bot, UI) — 100% AUTÓNOMO:
-Paso 1: commit_a_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx", nuevo_codigo, "NOVA: mejora UI")
-Paso 2: Si el bot está online → ejecutar_en_pc("run_command", {comando: "python -c \\"import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/thenecioia-png/nova-api-server/main/nova_deploy_frontend.py', 'nova_deploy_frontend.py')\\""})
-Paso 3: ejecutar_en_pc("run_command", {comando: "set NOVA_GH_TOKEN=${process.env.GITHUB_TOKEN ?? ""} && python nova_deploy_frontend.py"})
-→ El script descarga el repo, hace build del frontend y pushea a nova-ui → GitHub Pages actualiza en ~2 min.
-NOTA: Si el bot no está online, los cambios de frontend quedan en GitHub source pero Denison los verá cuando el bot vuelva a estar activo y N.O.V.A. haga el deploy.
+FLUJO PARA MODIFICAR EL BACKEND (cambio puntual — PREFERIDO):
+1. leer_de_github("nova-api-server", "artifacts/api-server/src/routes/asistente.ts") → ver código actual
+2. patch_github("nova-api-server", "artifacts/api-server/src/routes/asistente.ts", "texto_a_buscar", "texto_nuevo", "NOVA: descripción")
+→ Render redesplega en ~2-3 minutos → https://nova-api-server.onrender.com
+
+FLUJO PARA MODIFICAR EL FRONTEND (chat, bot, UI):
+Paso 1: leer_de_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx") → ver UI actual
+Paso 2: patch_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx", buscar, reemplazar, "NOVA: mejora UI")
+Paso 3 (deploy): Si el bot está online → ejecutar_en_pc("run_command", {comando: "python -c \\"import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/thenecioia-png/nova-api-server/main/nova_deploy_frontend.py', 'nova_deploy_frontend.py')\\""}) luego ejecutar_en_pc("run_command", {comando: "set NOVA_GH_TOKEN=${process.env.GITHUB_TOKEN ?? ""} && python nova_deploy_frontend.py"})
 
 RUTAS CRÍTICAS:
 • artifacts/api-server/src/routes/asistente.ts — Tu cerebro (herramientas, prompt, lógica)
 • artifacts/api-server/src/routes/bot.ts — Comandos del bot local
 • artifacts/asistente-ia/src/pages/chat.tsx — Tu interfaz de chat
 • artifacts/asistente-ia/src/pages/bot.tsx — Página del bot local
+• artifacts/asistente-ia/src/context/nova-chat.tsx — Estado global del chat
 
-CUÁNDO USAR commit_a_github:
-• Denison pide "agrégrate X función" → leer → modificar → commit → Render redesplega
-• Detectas un bug en producción → corregirte sola → commit
-• Denison dice "mejórate" → analizar → optimizar → commit
-• Quieres agregar una nueva herramienta → modificar asistente.ts → commit
+CUÁNDO USAR cada herramienta:
+• Denison pide "agrégrate X función" → leer_de_github → patch_github (cambio puntual)
+• Detectas un bug → patch_github con el fix exacto
+• Denison dice "mejórate" → analizar → patch_github → Render redesplega
+• Archivo nuevo o reescritura total → commit_a_github con contenido completo
 
-IMPORTANTE: commit_a_github reemplaza auto_modificar para cambios en producción.
-auto_modificar("escribir") solo cambia el Replit local (no la versión live).
-commit_a_github cambia la versión REAL que usa Denison en https://nova-api-server.onrender.com.
+IMPORTANTE: patch_github y commit_a_github cambian la versión REAL en https://nova-api-server.onrender.com.
 
 ════════════════════════════════════════
 AUTO-DEBUG — DETECCIÓN Y CORRECCIÓN AUTÓNOMA DE ERRORES
@@ -1187,6 +1256,62 @@ const TOOLS = [
           },
         },
         required: ["repo", "ruta_en_repo", "contenido"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "leer_de_github",
+      description: "Lee el contenido de cualquier archivo del repositorio de N.O.V.A. en GitHub. USAR SIEMPRE antes de modificar un archivo con commit_a_github o patch_github para ver el código actual. Funciona sin bot y sin acceder a la PC de Denison — lee directo de GitHub.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: {
+            type: "string",
+            enum: ["nova-api-server", "nova-ui"],
+            description: "Repositorio: 'nova-api-server' para el backend, 'nova-ui' para el frontend compilado",
+          },
+          ruta_en_repo: {
+            type: "string",
+            description: "Ruta del archivo en el repo (ej: 'artifacts/api-server/src/routes/asistente.ts')",
+          },
+        },
+        required: ["repo", "ruta_en_repo"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "patch_github",
+      description: "Aplica un cambio PUNTUAL (find & replace exacto) en un archivo del repositorio y hace commit automáticamente. PREFERIR sobre commit_a_github para modificaciones pequeñas — no necesitas el archivo completo, solo el fragmento a cambiar. Si el texto no se encuentra exactamente, devuelve error con contexto para que puedas corregirlo.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: {
+            type: "string",
+            enum: ["nova-api-server", "nova-ui"],
+            description: "Repositorio destino",
+          },
+          ruta_en_repo: {
+            type: "string",
+            description: "Ruta del archivo en el repo (ej: 'artifacts/api-server/src/routes/asistente.ts')",
+          },
+          buscar: {
+            type: "string",
+            description: "Texto EXACTO a buscar en el archivo (incluyendo espacios e indentación). Debe ser único en el archivo para evitar reemplazos no deseados.",
+          },
+          reemplazar: {
+            type: "string",
+            description: "Texto que reemplazará al texto encontrado. Puede ser vacío para borrar.",
+          },
+          mensaje_commit: {
+            type: "string",
+            description: "Mensaje del commit (ej: 'NOVA: mejora validación de inputs')",
+          },
+        },
+        required: ["repo", "ruta_en_repo", "buscar", "reemplazar"],
       },
     },
   },
@@ -1684,6 +1809,21 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
             const mensajeCommit = String(args.mensaje_commit ?? `NOVA auto-update: ${rutaEnRepo}`);
             sse({ tipo: "status", contenido: `🚀 Commiteando a GitHub → ${repo} (${rutaEnRepo})...` });
             toolResult = await commitAGithub(repo, rutaEnRepo, contenidoCommit, mensajeCommit);
+
+          } else if (toolCallName === "leer_de_github") {
+            const repo = String(args.repo ?? "") as "nova-api-server" | "nova-ui";
+            const rutaEnRepo = String(args.ruta_en_repo ?? "");
+            sse({ tipo: "status", contenido: `📖 Leyendo ${rutaEnRepo} desde GitHub...` });
+            toolResult = await leerDeGithub(repo, rutaEnRepo);
+
+          } else if (toolCallName === "patch_github") {
+            const repo = String(args.repo ?? "") as "nova-api-server" | "nova-ui";
+            const rutaEnRepo = String(args.ruta_en_repo ?? "");
+            const buscar = String(args.buscar ?? "");
+            const reemplazar = String(args.reemplazar ?? "");
+            const mensajeCommit = String(args.mensaje_commit ?? `NOVA patch: ${rutaEnRepo}`);
+            sse({ tipo: "status", contenido: `🔧 Aplicando patch en ${rutaEnRepo}...` });
+            toolResult = await patchGithub(repo, rutaEnRepo, buscar, reemplazar, mensajeCommit);
 
           } else if (toolCallName === "guardar_memoria") {
             const clave = String(args.clave ?? "").trim();
