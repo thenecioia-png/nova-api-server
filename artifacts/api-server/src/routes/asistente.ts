@@ -1607,8 +1607,8 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
           await streamAndCollect([...msgs, recoveryInjection]);
           return;
         } else {
-          // RECOVERY FAILED: stop and ask specifically
-          const aviso = "\n\n⚠️ Intenté una estrategia alternativa y sigo sin poder avanzar. Necesito tu ayuda para continuar:\n\n**¿Qué ves en tu pantalla ahora mismo?** Descríbemelo o toma un screenshot y envíamelo. También puedo continuar si me dices qué acción específica quieres que intente diferente.";
+          // RECOVERY FAILED: stop clearly without asking user to describe their screen
+          const aviso = "\n\n⚠️ Llegué a un bloqueo después de varios intentos automáticos. Dime qué quieres que haga diferente y continúo desde donde quedé.";
           fullContent += aviso;
           sse({ tipo: "token", contenido: aviso });
           return;
@@ -1730,17 +1730,6 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
               })()
             : toolCallName;
           recentActions.push(actionKey);
-
-          // Loop detection — now with corrected history
-          if (isStuckInLoop()) {
-            const hasBlockedCmds = recentActions.slice(-6).some(a => a.startsWith("pc:BLOCKED"));
-            const aviso = hasBlockedCmds
-              ? "\n\n⚠️ Repetí 3 veces seguidas un comando con parámetros incorrectos. Necesito que me digas exactamente cuál comando ejecutar y con qué argumentos concretos — no puedo adivinarlo."
-              : "\n\n⚠️ Detecté que llevo varias acciones repetidas sin avanzar. ¿Qué ves en la pantalla ahora mismo? Descríbemelo o dime qué acción diferente quieres que intente.";
-            fullContent += aviso;
-            sse({ tipo: "token", contenido: aviso });
-            return;
-          }
 
           const assistantToolMsg = {
             role: "assistant" as const,
