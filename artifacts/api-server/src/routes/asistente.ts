@@ -1430,24 +1430,39 @@ router.post("/asistente/ia", async (req, res) => {
       ...(sesionId ? { sesionId } : {}),
     });
 
+    // ── Model routing — use mini for simple chat, 4o only when truly needed ───
+    const hasUserImage = !!(archivoBase64 && archivoTipo?.startsWith("image/"));
+    const needsVision = hasUserImage; // auto-screenshot added later, also forces 4o
+    const impliesPC_early = botOnline &&
+      /\b(abre|abrir|click|clic|navega|navegar|ve a|entra|busca en|escribe en|teclea|descarga|instala|ejecuta|corre|lanza|mueve|arrastra|pantalla|escritorio|ventana|browser|chrome|firefox|edge|youtube|google|twitch|discord|steam|spotify|word|excel|notepad|cmd|terminal|tarea|haz|hazme|realiza|cierra\s+el|minimiza|maximiza|captura|screenshot|foto de la|imagen de la)\b/i
+      .test(mensaje);
+    const needsCode = /\b(código|programa|script|función|api|backend|frontend|deploy|github|render|base de datos|sql|json|html|css|typescript|javascript|python)\b/i.test(mensaje);
+
+    // Use gpt-4o only for: vision, PC control, auto-modification, complex code
+    const useGPT4o = needsVision || impliesPC_early || needsCode ||
+      /\b(autom[oó]difica|commit_a_github|leer_de_github|patch_github|deploy|redesplega)\b/i.test(mensaje);
+    const MODEL = useGPT4o ? "gpt-4o" : "gpt-4o-mini";
+    // Limit history: mini gets 8 msgs (cheap), 4o gets 16 msgs
+    const HIST_LIMIT = useGPT4o ? 16 : 8;
+    const MAX_OUT_TOKENS = useGPT4o ? 6000 : 2048;
+
     // ── Context compression ───────────────────────────────────────────────────
     let historialUsado = historial;
-    if (historial.length > 50) {
-      sse({ tipo: "status", contenido: "🧠 Comprimiendo historial..." });
+    if (historial.length > 40) {
       try {
-        const oldest = historial.slice(0, historial.length - 20);
+        const oldest = historial.slice(0, historial.length - HIST_LIMIT);
         const resumenResp = await openai.chat.completions.create({
           model: "gpt-4o-mini",
-          max_completion_tokens: 600,
+          max_completion_tokens: 400,
           messages: [
-            { role: "system", content: "Resume concisamente esta conversación en español. Máximo 3 párrafos. Captura hechos importantes, decisiones y contexto clave." },
-            ...oldest.map(h => ({ role: (h.rol === "usuario" ? "user" : "assistant") as "user" | "assistant", content: h.contenido })),
+            { role: "system", content: "Resume concisamente esta conversación en español. Máximo 2 párrafos. Solo hechos clave." },
+            ...oldest.map(h => ({ role: (h.rol === "usuario" ? "user" : "assistant") as "user" | "assistant", content: h.contenido.slice(0, 500) })),
           ],
         });
         const resumen = resumenResp.choices[0]?.message?.content ?? "";
         historialUsado = [
           { rol: "assistant", contenido: `[📚 RESUMEN]\n${resumen}` },
-          ...historial.slice(-20),
+          ...historial.slice(-HIST_LIMIT),
         ];
       } catch { /* use original */ }
     }
@@ -1456,7 +1471,7 @@ router.post("/asistente/ia", async (req, res) => {
     const systemPrompt = buildSystemPrompt(reglas, memoria, botOnline);
     const mensajes: any[] = [
       { role: "system", content: systemPrompt },
-      ...historialUsado.slice(-30).map(h => ({
+      ...historialUsado.slice(-HIST_LIMIT).map(h => ({
         role: h.rol === "usuario" ? "user" : "assistant",
         content: h.contenido,
       })),
@@ -1486,11 +1501,11 @@ router.post("/asistente/ia", async (req, res) => {
     }
 
     if (archivoBase64 && archivoTipo?.startsWith("image/")) {
-      // User sent an image file — use that as the visual context
+      // User sent an image file — use "low" detail (saves ~75% vision tokens vs "high")
       mensajes.push({
         role: "user",
         content: [
-          { type: "image_url", image_url: { url: `data:${archivoTipo};base64,${archivoBase64}`, detail: "high" } },
+          { type: "image_url", image_url: { url: `data:${archivoTipo};base64,${archivoBase64}`, detail: "low" } },
           { type: "text", text: mensaje || "¿Qué ves en esta imagen? Analízala detalladamente." },
         ],
       });
@@ -1501,23 +1516,27 @@ router.post("/asistente/ia", async (req, res) => {
       ];
       if (autoScreenBase64) {
         content.unshift(
-          { type: "image_url", image_url: { url: `data:image/png;base64,${autoScreenBase64}`, detail: "high" } },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${autoScreenBase64}`, detail: "low" } },
           { type: "text", text: `[🖥️ Vista actual del escritorio — ${new Date().toLocaleTimeString()}]` },
         );
       }
       mensajes.push({ role: "user", content: autoScreenBase64 ? content : content[0].text });
     } else if (autoScreenBase64) {
-      // Text message + auto-screenshot: N.O.V.A. sees screen AND user message together
+      // Text message + auto-screenshot — force gpt-4o since vision is now needed
       mensajes.push({
         role: "user",
         content: [
-          { type: "image_url", image_url: { url: `data:image/png;base64,${autoScreenBase64}`, detail: "high" } },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${autoScreenBase64}`, detail: "low" } },
           { type: "text", text: `[🖥️ Vista actual del escritorio — ${new Date().toLocaleTimeString()}] (ya tienes el screenshot, no tomes otro)\n\n${mensaje}` },
         ],
       });
     } else {
       mensajes.push({ role: "user", content: mensaje });
     }
+
+    // If auto-screenshot was injected, ensure we use gpt-4o (vision required)
+    const finalModel = (autoScreenBase64 || hasUserImage) ? "gpt-4o" : MODEL;
+    const finalMaxTokens = (autoScreenBase64 || hasUserImage) ? 6000 : MAX_OUT_TOKENS;
 
     // ── Streaming state ───────────────────────────────────────────────────────
     let fullContent = "";
@@ -1660,8 +1679,8 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
       for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
         try {
           stream = await openai.chat.completions.create({
-            model: "gpt-4o",
-            max_completion_tokens: attempt >= 2 ? 8192 : 16384, // reducir tokens en reintentos tardíos
+            model: attempt >= 2 ? "gpt-4o-mini" : finalModel, // degrade to mini on 3rd+ retry to save tokens
+            max_completion_tokens: attempt >= 2 ? 2048 : finalMaxTokens,
             messages: msgsForCall,
             tools: ACTIVE_TOOLS,
             tool_choice: opts.forceTool ? "required" as const : "auto" as const,
