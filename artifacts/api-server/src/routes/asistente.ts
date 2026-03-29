@@ -1494,23 +1494,44 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
       // Without this, 10+ screenshots = 15-20 MB of base64 = token limit exceeded = silent task death.
       const trimmedMsgs = trimOldScreenshots(msgs);
 
+      // ── OpenAI call with auto-retry on 429 rate limit ────────────────────────
       let stream: any;
-      try {
-        stream = await openai.chat.completions.create({
-          model: "gpt-4o",
-          max_completion_tokens: 16384,
-          messages: trimmedMsgs,
-          tools: ACTIVE_TOOLS,
-          tool_choice: opts.forceTool ? "required" as const : "auto" as const,
-          stream: true,
-        });
-      } catch (apiErr: any) {
-        const errMsg = apiErr?.message || String(apiErr);
-        req.log.error({ apiErr }, "OpenAI API error in streamAndCollect");
-        const aviso = `\n\n⛔ Error de API: ${errMsg.slice(0, 200)}. Intenta con una tarea más corta o dime "continúa" para reintentar.`;
-        fullContent += aviso;
-        sse({ tipo: "token", contenido: aviso });
-        return;
+      const MAX_API_RETRIES = 3;
+      for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
+        try {
+          stream = await openai.chat.completions.create({
+            model: "gpt-4o",
+            max_completion_tokens: 16384,
+            messages: trimmedMsgs,
+            tools: ACTIVE_TOOLS,
+            tool_choice: opts.forceTool ? "required" as const : "auto" as const,
+            stream: true,
+          });
+          break; // success
+        } catch (apiErr: any) {
+          const errMsg: string = apiErr?.message || String(apiErr);
+          const is429 = errMsg.includes("429") || errMsg.includes("Rate limit") || apiErr?.status === 429;
+
+          if (is429 && attempt < MAX_API_RETRIES) {
+            // Extract wait time from OpenAI error message (e.g. "Please try again in 918ms")
+            const msMatch = errMsg.match(/try again in (\d+)ms/);
+            const sMatch  = errMsg.match(/try again in ([\d.]+)s/);
+            let waitMs = 2000 * (attempt + 1); // default backoff: 2s, 4s, 6s
+            if (msMatch) waitMs = Math.max(parseInt(msMatch[1]) + 200, waitMs);
+            else if (sMatch) waitMs = Math.max(Math.ceil(parseFloat(sMatch[1]) * 1000) + 200, waitMs);
+
+            sse({ tipo: "status", contenido: `⏳ Límite de velocidad — reintentando en ${(waitMs / 1000).toFixed(1)}s (intento ${attempt + 1}/${MAX_API_RETRIES})...` });
+            await new Promise(r => setTimeout(r, waitMs));
+            continue;
+          }
+
+          // Non-retryable error or retries exhausted
+          req.log.error({ apiErr }, "OpenAI API error in streamAndCollect");
+          const aviso = `\n\n⛔ Error de API: ${errMsg.slice(0, 200)}. Intenta con una tarea más corta o dime "continúa" para reintentar.`;
+          fullContent += aviso;
+          sse({ tipo: "token", contenido: aviso });
+          return;
+        }
       }
 
       for await (const chunk of stream) {
