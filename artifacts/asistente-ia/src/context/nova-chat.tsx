@@ -52,6 +52,8 @@ interface NovaChatContextValue {
   botOnline: boolean;
   botResultsQueue: number[];
   setBotResultsQueue: React.Dispatch<React.SetStateAction<number[]>>;
+  selfRepairActive: boolean;
+  toggleSelfRepair: () => void;
 
   sendMessage: (
     msg: string,
@@ -60,6 +62,7 @@ interface NovaChatContextValue {
     fileNombre?: string,
     speakFn?: (text: string) => void
   ) => Promise<void>;
+  pauseStream: () => void;
 
   loadSessionMessages: (sid: string) => Promise<void>;
   loadSessions: () => Promise<void>;
@@ -82,6 +85,36 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [botOnline, setBotOnline] = useState(false);
   const [botResultsQueue, setBotResultsQueue] = useState<number[]>([]);
+  const [selfRepairActive, setSelfRepairActive] = useState<boolean>(
+    () => localStorage.getItem("nova_self_repair") !== "false"
+  );
+
+  const toggleSelfRepair = useCallback(() => {
+    setSelfRepairActive(prev => {
+      const next = !prev;
+      localStorage.setItem("nova_self_repair", String(next));
+      return next;
+    });
+  }, []);
+
+  const pauseStream = useCallback(() => {
+    if (!streamingRef.current) return;
+    abortRef.current?.abort();
+    streamingRef.current = false;
+    setIsStreaming(false);
+    setLocalMessages(prev => {
+      const copy = [...prev];
+      const last = copy[copy.length - 1];
+      if (last?.rol === "assistant") {
+        const txt = last.contenido?.trim();
+        copy[copy.length - 1] = {
+          ...last,
+          contenido: txt ? txt + "\n\n_⏸ Respuesta pausada._" : "⏸ Respuesta pausada.",
+        };
+      }
+      return copy;
+    });
+  }, []);
 
   // ── IMPORTANT: abortRef is NOT cleaned up on unmount ─────────────────────────
   // This is intentional — the stream continues even when ChatPage unmounts.
@@ -395,7 +428,8 @@ export function NovaChatProvider({ children }: { children: ReactNode }) {
       localMessages, setLocalMessages,
       isStreaming, sessionId, sessions,
       botOnline, botResultsQueue, setBotResultsQueue,
-      sendMessage,
+      selfRepairActive, toggleSelfRepair,
+      sendMessage, pauseStream,
       loadSessionMessages, loadSessions,
       handleNuevoChat, handleSwitchSession,
       handleEliminarSesion, handleEliminarChat,
