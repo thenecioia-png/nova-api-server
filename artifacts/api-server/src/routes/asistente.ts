@@ -834,10 +834,12 @@ FLUJO DETALLADO PARA MODIFICAR EL BACKEND (API server):
 • → Render redesplega automáticamente en ~2-3 minutos
 • → La nueva versión vive en https://nova-api-server.onrender.com
 
-FLUJO PARA MODIFICAR EL FRONTEND (chat, bot, UI):
-• auto_modificar("leer", "artifacts/asistente-ia/src/pages/chat.tsx")
-• commit_a_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx", nuevo_codigo, "NOVA: mejora UI")
-• [El frontend necesita rebuild para ver cambios en GitHub Pages. Solo el repo nova-ui sirve el dist compilado.]
+FLUJO PARA MODIFICAR EL FRONTEND (chat, bot, UI) — 100% AUTÓNOMO:
+Paso 1: commit_a_github("nova-api-server", "artifacts/asistente-ia/src/pages/chat.tsx", nuevo_codigo, "NOVA: mejora UI")
+Paso 2: Si el bot está online → ejecutar_en_pc("run_command", {comando: "python -c \\"import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/thenecioia-png/nova-api-server/main/nova_deploy_frontend.py', 'nova_deploy_frontend.py')\\""})
+Paso 3: ejecutar_en_pc("run_command", {comando: "set NOVA_GH_TOKEN=${process.env.GITHUB_TOKEN ?? ""} && python nova_deploy_frontend.py"})
+→ El script descarga el repo, hace build del frontend y pushea a nova-ui → GitHub Pages actualiza en ~2 min.
+NOTA: Si el bot no está online, los cambios de frontend quedan en GitHub source pero Denison los verá cuando el bot vuelva a estar activo y N.O.V.A. haga el deploy.
 
 RUTAS CRÍTICAS:
 • artifacts/api-server/src/routes/asistente.ts — Tu cerebro (herramientas, prompt, lógica)
