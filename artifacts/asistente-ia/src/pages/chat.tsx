@@ -326,7 +326,7 @@ export default function ChatPage() {
         </header>
 
         {/* ── Chat messages ────────────────────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 scroll-smooth">
+        <div className="flex-1 overflow-y-auto px-4 md:px-6 py-6 space-y-6 scroll-smooth">
           {localMessages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center opacity-50 select-none">
               <div className="w-24 h-24 mb-6 rounded-full border border-primary/20 flex items-center justify-center relative">
@@ -346,49 +346,83 @@ export default function ChatPage() {
           ) : (
             <>
             <AnimatePresence initial={false}>
-              {localMessages.map((msg, idx) => (
-                <motion.div
-                  key={idx}
-                  initial={{ opacity: 0, y: 10, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  transition={{ duration: 0.2 }}
-                  className={cn("flex w-full", msg.rol === "user" ? "justify-end" : "justify-start")}
-                >
-                  <div className={cn(
-                    "max-w-[88%] md:max-w-[78%] rounded-2xl p-4 shadow-lg",
-                    msg.rol === "user"
-                      ? "bg-primary/10 border border-primary/30 text-primary-foreground backdrop-blur-md rounded-br-sm"
-                      : msg.tipo === "bot-resultado"
-                        ? "bg-cyan-950/40 border border-cyan-500/20 text-card-foreground rounded-bl-sm"
-                        : "bg-card border border-white/5 text-card-foreground rounded-bl-sm"
-                  )}>
+              {localMessages.map((msg, idx) => {
+                // No renderizar la burbuja vacía del asistente mientras llega el primer token
+                const isEmptyPlaceholder = msg.rol === "assistant" && !msg.contenido && !msg.imageUrl && isStreaming && idx === localMessages.length - 1;
+                if (isEmptyPlaceholder) return null;
+
+                return (
+                  <motion.div
+                    key={idx}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.22, ease: "easeOut" }}
+                    className={cn("flex w-full", msg.rol === "user" ? "justify-end" : "justify-start")}
+                  >
+                    {/* Avatar lateral solo para N.O.V.A. */}
                     {msg.rol === "assistant" && (
-                      <div className="flex items-center gap-2 mb-2">
-                        {msg.tipo === "bot-resultado"
-                          ? <><Cpu className="w-3 h-3 text-cyan-400" /><span className="text-[10px] font-mono text-cyan-400/70 uppercase tracking-wider">BOT_RESULTADO</span></>
-                          : <><span className="w-2 h-2 rounded-full bg-accent animate-pulse" /><span className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">N.O.V.A</span></>
-                        }
+                      <div className="flex-shrink-0 mr-3 mt-1">
+                        <div className={cn(
+                          "w-7 h-7 rounded-full flex items-center justify-center border",
+                          msg.tipo === "bot-resultado"
+                            ? "border-cyan-500/30 bg-cyan-950/40"
+                            : "border-primary/20 bg-primary/5"
+                        )}>
+                          {msg.tipo === "bot-resultado"
+                            ? <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                            : <Bot className="w-3.5 h-3.5 text-primary/70" />
+                          }
+                        </div>
                       </div>
                     )}
 
-                    {msg.imageUrl && (
-                      <div className="mb-3 rounded-xl overflow-hidden border border-white/10">
-                        <img src={msg.imageUrl} alt="Imagen generada" className="w-full max-w-lg rounded-xl" />
-                      </div>
-                    )}
+                    <div className={cn(
+                      "rounded-2xl shadow-lg",
+                      msg.rol === "user"
+                        ? "max-w-[80%] md:max-w-[70%] px-4 py-3 bg-primary/10 border border-primary/25 text-primary-foreground backdrop-blur-md rounded-br-sm"
+                        : msg.tipo === "bot-resultado"
+                          ? "flex-1 max-w-[calc(100%-2.5rem)] px-4 py-3 bg-cyan-950/30 border border-cyan-500/15 text-card-foreground rounded-bl-sm"
+                          : "flex-1 max-w-[calc(100%-2.5rem)] px-4 py-3 bg-card/80 border border-white/5 text-card-foreground rounded-bl-sm"
+                    )}>
 
-                    {msg.contenido && (
-                      <div className={cn("prose prose-sm max-w-none", msg.rol === "user" ? "prose-invert text-foreground" : "prose-invert")}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.contenido}</ReactMarkdown>
-                      </div>
-                    )}
+                      {/* Label encima del contenido, solo asistente */}
+                      {msg.rol === "assistant" && (
+                        <p className={cn(
+                          "text-[10px] font-mono uppercase tracking-widest mb-2",
+                          msg.tipo === "bot-resultado" ? "text-cyan-400/60" : "text-primary/40"
+                        )}>
+                          {msg.tipo === "bot-resultado" ? "Resultado del bot" : "N.O.V.A"}
+                        </p>
+                      )}
 
-                    {msg.rol === "assistant" && idx === localMessages.length - 1 && isStreaming && !msg.imageUrl && (
-                      <span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse" />
-                    )}
-                  </div>
-                </motion.div>
-              ))}
+                      {msg.imageUrl && (
+                        <div className="mb-3 rounded-xl overflow-hidden border border-white/10">
+                          <img src={msg.imageUrl} alt="Imagen generada" className="w-full max-w-lg rounded-xl" />
+                        </div>
+                      )}
+
+                      {msg.contenido && (
+                        <div className={cn(
+                          "prose prose-sm max-w-none leading-relaxed",
+                          msg.rol === "user"
+                            ? "prose-invert text-foreground/90"
+                            : "prose-invert prose-p:my-1.5 prose-headings:mt-3 prose-headings:mb-1 prose-li:my-0.5 prose-code:text-cyan-300 prose-pre:bg-black/40"
+                        )}>
+                          {msg.rol === "user"
+                            ? <p className="m-0 whitespace-pre-wrap">{msg.contenido}</p>
+                            : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.contenido}</ReactMarkdown>
+                          }
+                        </div>
+                      )}
+
+                      {/* Cursor parpadeante mientras streamea */}
+                      {msg.rol === "assistant" && idx === localMessages.length - 1 && isStreaming && !msg.imageUrl && (
+                        <span className="inline-block w-0.5 h-[1em] bg-primary/70 ml-0.5 align-text-bottom animate-pulse" />
+                      )}
+                    </div>
+                  </motion.div>
+                );
+              })}
             </AnimatePresence>
 
             {/* ── Indicador de status flotante — aparece y desaparece ──────── */}
