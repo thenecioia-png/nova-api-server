@@ -212,7 +212,84 @@ setInterval(() => {
       activeProviderIndex = 0;
     }
   }
-}, 5 * 60 * 1000); // check every 5 minutes
+}, 5 * 60 * 1000);
+
+// ── Smart Cost Router ──────────────────────────────────────────────────────────
+// FREE tier  → Pollinations AI (index 1) — gratis, sin costo
+// PAID tier  → OpenAI (index 0)          — solo cuando realmente se necesita
+
+const FREE_PROVIDER_INDEX = 1; // Pollinations AI
+
+// Patterns that REQUIRE paid OpenAI (tools, vision, PC control, code generation)
+const PAID_PATTERNS = /\b(abre|abrir|click|clic|naveg|teclea|escribe en|descarga|instala|ejecuta|corre|lanza|mueve|arrastra|pantalla|escritorio|ventana|browser|chrome|firefox|edge|youtube|google|twitch|discord|steam|spotify|word|excel|notepad|cmd|terminal|screenshot|foto de la|hazme|código|code|programa|script|función|función|api|backend|frontend|deploy|github|render|sql|html|css|javascript|typescript|python|json|bash|shell|git|docker|base de datos|database|archivo de|crea (el|la|un|una)|genera (el|la|un|una)|implementa|desarrolla|analiza (el|la)|diseña|automatiza|cobranza|app|aplicación|proyecto)\b/i;
+
+// Patterns that are clearly FREE (greetings, simple questions, quick lookups)
+const FREE_PATTERNS = /^(hola|hi|hey|buenas|qué tal|cómo estás|gracias|ok|oye|dime|cuál es|qué es|quién es|cuándo|dónde|explica|define|qué significa|diferencia entre|ayuda|help|qué hora|fecha|clima|qué recomiendas|consejo|tip|idea|rápido|quick)/i;
+
+interface TaskTier {
+  tier: "free" | "paid";
+  reason: string;
+  startIndex: number;
+  maxTokens: number;
+  histLimit: number;
+}
+
+function classifyTaskTier(mensaje: string, botOnline: boolean, hasImage: boolean): TaskTier {
+  const isPaidPattern = PAID_PATTERNS.test(mensaje);
+  const isFreePattern = FREE_PATTERNS.test(mensaje.trim());
+  const isLong = mensaje.length > 200;
+  const needsBot = botOnline && /\b(abre|click|clic|ejecuta|haz|hazme|naveg|teclea|instala|descarga|mueve|arrastra|ventana|browser|pantalla|escritorio|screenshot)\b/i.test(mensaje);
+  const needsVision = hasImage;
+
+  // Always paid: bot control, vision, code generation, complex patterns, long tasks
+  if (needsBot || needsVision || (isPaidPattern && !isFreePattern) || isLong) {
+    return {
+      tier: "paid",
+      reason: needsBot ? "control de PC" : needsVision ? "análisis de imagen" : isLong ? "tarea compleja" : "generación de código/proyecto",
+      startIndex: 0,
+      maxTokens: 6000,
+      histLimit: 16,
+    };
+  }
+
+  // Free: simple questions, greetings, short lookups
+  return {
+    tier: "free",
+    reason: "pregunta simple",
+    startIndex: FREE_PROVIDER_INDEX,
+    maxTokens: 1500,
+    histLimit: 8,
+  };
+}
+
+// ── Token cost estimator (OpenAI pricing) ──────────────────────────────────────
+const COST_PER_1K: Record<string, { input: number; output: number }> = {
+  "gpt-4o":      { input: 0.0025,   output: 0.01 },
+  "gpt-4o-mini": { input: 0.00015,  output: 0.0006 },
+};
+
+// Accumulated cost tracker (in-memory, resets on restart)
+let accumulatedCostUSD = 0;
+let requestsThisSession = 0;
+let freeSavingsUSD = 0;
+
+function estimateCost(model: string, inputChars: number, outputChars: number): number {
+  const rates = COST_PER_1K[model] ?? { input: 0.00015, output: 0.0006 };
+  const inputTokens = inputChars / 4; // ~4 chars per token
+  const outputTokens = outputChars / 4;
+  return (inputTokens / 1000) * rates.input + (outputTokens / 1000) * rates.output;
+}
+
+// Endpoint to query cost stats
+router.get("/asistente/costos", (_req, res) => {
+  res.json({
+    sesion: {
+      totalUSD: accumulatedCostUSD.toFixed(6),
+      ahorradoUSD: freeSavingsUSD.toFixed(6),
+      solicitudes: requestsThisSession,
+    },
+  });
+});
 
 const execAsync = promisify(exec);
 const router: IRouter = Router();
@@ -1972,9 +2049,31 @@ router.post("/asistente/ia", async (req, res) => {
       ...(sesionId ? { sesionId } : {}),
     });
 
-    // ── Model routing — use mini for simple chat, 4o only when truly needed ───
+    // ── Smart Cost Router — classify task before hitting any AI ──────────────
     const hasUserImage = !!(archivoBase64 && archivoTipo?.startsWith("image/"));
-    const needsVision = hasUserImage; // auto-screenshot added later, also forces 4o
+    const taskTier = classifyTaskTier(mensaje, botOnline, hasUserImage);
+
+    // Per-request provider index — starts at tier's recommended provider
+    // Falls back through the chain if that provider fails
+    let requestProviderIndex = taskTier.startIndex;
+
+    // Override to always start at OpenAI if global was forced higher (billing issue)
+    // But for FREE tier, always start at Pollinations regardless
+    if (taskTier.tier === "paid" && activeProviderIndex > 0) {
+      // OpenAI had a billing issue previously — stay on fallback for paid tasks too
+      requestProviderIndex = activeProviderIndex;
+    }
+
+    // For free tasks: notify silently (no SSE noise) and skip straight to free provider
+    if (taskTier.tier === "free") {
+      freeSavingsUSD += 0.0002; // estimate ~$0.0002 saved per free request
+    }
+
+    // Track request count
+    requestsThisSession++;
+
+    // ── Model routing — use mini for simple chat, 4o only when truly needed ───
+    const needsVision = hasUserImage;
     const impliesPC_early = botOnline &&
       /\b(abre|abrir|click|clic|navega|navegar|ve a|entra|busca en|escribe en|teclea|descarga|instala|ejecuta|corre|lanza|mueve|arrastra|pantalla|escritorio|ventana|browser|chrome|firefox|edge|youtube|google|twitch|discord|steam|spotify|word|excel|notepad|cmd|terminal|tarea|haz|hazme|realiza|cierra\s+el|minimiza|maximiza|captura|screenshot|foto de la|imagen de la)\b/i
       .test(mensaje);
@@ -1984,9 +2083,9 @@ router.post("/asistente/ia", async (req, res) => {
     const useGPT4o = needsVision || impliesPC_early || needsCode ||
       /\b(autom[oó]difica|commit_a_github|leer_de_github|patch_github|deploy|redesplega)\b/i.test(mensaje);
     const MODEL = useGPT4o ? "gpt-4o" : "gpt-4o-mini";
-    // Limit history: mini gets 8 msgs (cheap), 4o gets 16 msgs
-    const HIST_LIMIT = useGPT4o ? 16 : 8;
-    const MAX_OUT_TOKENS = useGPT4o ? 6000 : 2048;
+    // Respect tier limits
+    const HIST_LIMIT = taskTier.histLimit;
+    const MAX_OUT_TOKENS = taskTier.maxTokens;
 
     // ── Context compression ───────────────────────────────────────────────────
     let historialUsado = historial;
@@ -2022,6 +2121,14 @@ router.post("/asistente/ia", async (req, res) => {
     // ── Detect if message implies PC/browser work (smart auto-screenshot) ──────
     const PC_KEYWORDS = /\b(abre|abrir|click|clic|navega|navegar|ve a|entra|busca en|escribe en|teclea|descarga|instala|ejecuta|corre|lanza|mueve|arrastra|pantalla|escritorio|ventana|browser|chrome|firefox|edge|youtube|google|twitch|discord|steam|spotify|word|excel|notepad|cmd|terminal|control\s*panel|tarea|tare[a-z]|haz|hazme|realiza|abre\s+el|cierra\s+el|minimiza|maximiza|captura|screenshot|foto de la|imagen de la)\b/i;
     const impliesPC = botOnline && PC_KEYWORDS.test(mensaje);
+
+    // ── Cost tier context injection ───────────────────────────────────────────
+    if (taskTier.tier === "free") {
+      mensajes.push({
+        role: "system" as const,
+        content: `[MODO ECONÓMICO] Esta pregunta es simple. Responde de forma directa y concisa (máx 150 palabras). Sin introducción larga. Sin repetir la pregunta. Al grano.`,
+      });
+    }
 
     // ── Late system injection: only hint when message truly implies PC work ────
     if (impliesPC) {
@@ -2221,29 +2328,27 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
       let callSuccess = false;
 
       while (!callSuccess) {
-        const provider = getActiveProvider();
-        const needsVision = !!(autoScreenBase64 || hasUserImage);
-        const providerModel = needsVision && provider.supportsTools ? provider.visionModel : provider.chatModel;
-        const selectedModel = needsVision ? providerModel : (finalModel === "gpt-4o" ? provider.visionModel : provider.chatModel);
+        // Use per-request provider index (respects cost tier)
+        const provider = AI_PROVIDERS[requestProviderIndex] ?? AI_PROVIDERS[0];
+        const needsVisionNow = !!(autoScreenBase64 || hasUserImage);
+        const providerModel = needsVisionNow && provider.supportsTools ? provider.visionModel : provider.chatModel;
+        const selectedModel = needsVisionNow ? providerModel : (finalModel === "gpt-4o" ? provider.visionModel : provider.chatModel);
 
         // For free/fallback providers: trim the system prompt to avoid context limit errors
-        // Pollinations AI and similar have much smaller context windows than OpenAI
         const isPaidProvider = provider.name === "OpenAI";
         let msgsForThisCall = msgsForCall;
         if (!isPaidProvider) {
           msgsForThisCall = msgsForCall.map((m: any) => {
             if (m.role === "system" && typeof m.content === "string" && m.content.length > 6000) {
-              // Keep first 3000 chars (core identity/tools) + last 2000 chars (recent context)
               const content = m.content;
               const trimmed = content.slice(0, 3000) + "\n\n[...instrucciones completas en modo OpenAI...]\n\n" + content.slice(-2000);
               return { ...m, content: trimmed };
             }
             return m;
           });
-          // Also keep only last 12 conversation turns for free providers
           const sysMessages = msgsForThisCall.filter((m: any) => m.role === "system");
           const convMessages = msgsForThisCall.filter((m: any) => m.role !== "system");
-          msgsForThisCall = [...sysMessages, ...convMessages.slice(-12)];
+          msgsForThisCall = [...sysMessages, ...convMessages.slice(-8)];
         }
 
         for (let attempt = 0; attempt <= MAX_RATE_RETRIES; attempt++) {
@@ -2272,19 +2377,22 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
             req.log.error({ apiErr, provider: provider.name }, "AI provider error");
 
             if (isBillingError(apiErr)) {
-              // Switch to next provider permanently
-              if (activeProviderIndex < AI_PROVIDERS.length - 1) {
-                activeProviderIndex++;
+              // Mark OpenAI as unavailable globally (it's out of credits)
+              if (provider.name === "OpenAI") {
+                activeProviderIndex = Math.max(activeProviderIndex, FREE_PROVIDER_INDEX);
                 lastProviderSwitchTime = Date.now();
-                const next = AI_PROVIDERS[activeProviderIndex];
-                sse({ tipo: "status", contenido: `⚡ Cambiando a ${next.name} (gratis) — continuando sin interrupciones...` });
-                break; // break retry loop, outer while will retry with new provider
+              }
+              // Try next provider for THIS request
+              if (requestProviderIndex < AI_PROVIDERS.length - 1) {
+                requestProviderIndex++;
+                const next = AI_PROVIDERS[requestProviderIndex];
+                sse({ tipo: "status", contenido: `⚡ OpenAI sin saldo — usando ${next.name} (gratis) automáticamente...` });
+                break;
               } else {
-                // All providers exhausted
-                const aviso = `\n\n⛔ **Sin proveedores de IA disponibles**\n\nTu balance de OpenAI se agotó y los proveedores alternativos también están fallando.\n\n**Para resolver esto:**\n1. **Recarga OpenAI** → platform.openai.com/account/billing → Add credits ($5 mínimo)\n2. **O activa GitHub Models gratis** → dile al admin que agregue \`GITHUB_TOKEN\` en Render\n\nUna vez recargado, di "reconecta" para reiniciar.`;
+                const aviso = `\n\n⛔ **Sin proveedores de IA disponibles**\n\nTu balance de OpenAI se agotó y los proveedores alternativos también están fallando.\n\n**Para resolver esto:**\n1. **Recarga OpenAI** → platform.openai.com/account/billing → Add credits ($5 mínimo)\n\nUna vez recargado, di "reconecta" para reiniciar.`;
                 fullContent += aviso;
                 sse({ tipo: "token", contenido: aviso });
-                activeProviderIndex = 0; // Reset so OpenAI is tried again on next request
+                activeProviderIndex = 0;
                 return;
               }
             }
@@ -2308,10 +2416,10 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
               continue;
             }
 
-            // Unknown error — try next provider
-            if (activeProviderIndex < AI_PROVIDERS.length - 1) {
-              activeProviderIndex++;
-              const next = AI_PROVIDERS[activeProviderIndex];
+            // Unknown error — try next provider for this request
+            if (requestProviderIndex < AI_PROVIDERS.length - 1) {
+              requestProviderIndex++;
+              const next = AI_PROVIDERS[requestProviderIndex];
               sse({ tipo: "status", contenido: `⚡ Error en ${provider.name} — cambiando a ${next.name}...` });
               break;
             }
@@ -2758,6 +2866,21 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
       contenido: finalRespuesta,
       ...(sesionId ? { sesionId } : {}),
     });
+
+    // ── Cost tracking ─────────────────────────────────────────────────────────
+    const usedProvider = AI_PROVIDERS[requestProviderIndex] ?? AI_PROVIDERS[0];
+    const isOpenAICall = usedProvider.name === "OpenAI";
+    if (isOpenAICall) {
+      const inputSize = mensajes.reduce((acc: number, m: any) => acc + (typeof m.content === "string" ? m.content.length : 500), 0);
+      const outputSize = finalRespuesta.length;
+      const cost = estimateCost(MODEL, inputSize, outputSize);
+      accumulatedCostUSD += cost;
+      req.log.info({ cost: cost.toFixed(6), total: accumulatedCostUSD.toFixed(4), tier: taskTier.tier }, "Request cost");
+    } else {
+      // Free tier — track savings vs OpenAI equivalent
+      const savedCost = estimateCost("gpt-4o-mini", 2000, finalRespuesta.length);
+      freeSavingsUSD += savedCost;
+    }
 
     clearInterval(pingInterval);
     sse({ tipo: "done", respuesta: finalRespuesta, imageUrl, botCommandIds, accion, datos });
