@@ -2043,11 +2043,7 @@ router.post("/asistente/ia", async (req, res) => {
       /^(continúa|continua|sigue|next|continue|adelante|go on|next step|seguir)\.?$/i.test(mensaje.trim());
 
     // Save user message (with session ID if provided)
-    await db.insert(historialTable).values({
-      rol: "usuario",
-      contenido: mensaje || "[Archivo enviado]",
-      ...(sesionId ? { sesionId } : {}),
-    });
+    try { await db.insert(historialTable).values({ rol: "usuario", contenido: mensaje || "[Archivo enviado]", ...(sesionId ? { sesionId } : {}) }); } catch { /* no db */ }
 
     // ── Smart Cost Router — classify task before hitting any AI ──────────────
     const hasUserImage = !!(archivoBase64 && archivoTipo?.startsWith("image/"));
@@ -2861,11 +2857,7 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
     } catch { /* use raw content */ }
 
     // Save assistant response (with session ID if provided)
-    await db.insert(historialTable).values({
-      rol: "assistant",
-      contenido: finalRespuesta,
-      ...(sesionId ? { sesionId } : {}),
-    });
+    try { await db.insert(historialTable).values({ rol: "assistant", contenido: finalRespuesta, ...(sesionId ? { sesionId } : {}) }); } catch { /* no db */ }
 
     // ── Cost tracking ─────────────────────────────────────────────────────────
     const usedProvider = AI_PROVIDERS[requestProviderIndex] ?? AI_PROVIDERS[0];
