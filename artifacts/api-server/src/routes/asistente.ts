@@ -6,15 +6,218 @@ import {
   botCommandsTable, tareasTable
 } from "@workspace/db";
 import { eq, and, or, isNull, desc, sql as drizzleSql } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai as openaiWorkspace } from "@workspace/integrations-openai-ai-server";
+import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 
+// ── Multi-provider AI fallback system ─────────────────────────────────────────
+// Providers are tried in order. If one fails with a billing/quota error,
+// the next provider is used automatically and remembered for the session.
+interface AIProvider {
+  name: string;
+  client: OpenAI;
+  chatModel: string;
+  visionModel: string;
+  supportsTools: boolean;
+  tokenParam: "max_completion_tokens" | "max_tokens";
+}
+
+function buildProviders(): AIProvider[] {
+  const providers: AIProvider[] = [];
+
+  // 1. OpenAI (paid — primary)
+  providers.push({
+    name: "OpenAI",
+    client: openaiWorkspace as any,
+    chatModel: "gpt-4o-mini",
+    visionModel: "gpt-4o",
+    supportsTools: true,
+    tokenParam: "max_completion_tokens",
+  });
+
+  // 2. Groq (free tier — very fast, supports tools + vision)
+  if (process.env.GROQ_API_KEY) {
+    providers.push({
+      name: "Groq",
+      client: new OpenAI({
+        apiKey: process.env.GROQ_API_KEY,
+        baseURL: "https://api.groq.com/openai/v1",
+      }),
+      chatModel: "llama-3.3-70b-versatile",
+      visionModel: "llama-3.2-11b-vision-preview",
+      supportsTools: true,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 3. OpenRouter (free models — fallback)
+  if (process.env.OPENROUTER_API_KEY) {
+    providers.push({
+      name: "OpenRouter",
+      client: new OpenAI({
+        apiKey: process.env.OPENROUTER_API_KEY,
+        baseURL: "https://openrouter.ai/api/v1",
+        defaultHeaders: { "HTTP-Referer": "https://nova-api-server.onrender.com", "X-Title": "N.O.V.A" },
+      }),
+      chatModel: "meta-llama/llama-3.3-70b-instruct:free",
+      visionModel: "meta-llama/llama-3.2-11b-vision-instruct:free",
+      supportsTools: false,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 4. Together AI (free $25 credit on signup — together.ai)
+  if (process.env.TOGETHER_API_KEY) {
+    providers.push({
+      name: "Together AI",
+      client: new OpenAI({
+        apiKey: process.env.TOGETHER_API_KEY,
+        baseURL: "https://api.together.xyz/v1",
+      }),
+      chatModel: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+      visionModel: "meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo",
+      supportsTools: true,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 5. Mistral AI (free tier — console.mistral.ai)
+  if (process.env.MISTRAL_API_KEY) {
+    providers.push({
+      name: "Mistral AI",
+      client: new OpenAI({
+        apiKey: process.env.MISTRAL_API_KEY,
+        baseURL: "https://api.mistral.ai/v1",
+      }),
+      chatModel: "mistral-small-latest",
+      visionModel: "pixtral-12b-2409",
+      supportsTools: true,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 6. Cerebras AI (free tier, super rápido — cloud.cerebras.ai)
+  if (process.env.CEREBRAS_API_KEY) {
+    providers.push({
+      name: "Cerebras",
+      client: new OpenAI({
+        apiKey: process.env.CEREBRAS_API_KEY,
+        baseURL: "https://api.cerebras.ai/v1",
+      }),
+      chatModel: "llama-3.3-70b",
+      visionModel: "llama-3.3-70b",
+      supportsTools: true,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 7. SambaNova Cloud (free tier — cloud.sambanova.ai)
+  if (process.env.SAMBANOVA_API_KEY) {
+    providers.push({
+      name: "SambaNova",
+      client: new OpenAI({
+        apiKey: process.env.SAMBANOVA_API_KEY,
+        baseURL: "https://api.sambanova.ai/v1",
+      }),
+      chatModel: "Meta-Llama-3.3-70B-Instruct",
+      visionModel: "Llama-3.2-11B-Vision-Instruct",
+      supportsTools: false,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 8. Pollinations AI — TOTALMENTE GRATIS, sin API key, siempre disponible
+  // Fuente: https://text.pollinations.ai — funciona sin registrarse
+  providers.push({
+    name: "Pollinations AI",
+    client: new OpenAI({
+      apiKey: "pollinations-free-no-key-needed",
+      baseURL: "https://text.pollinations.ai/openai",
+    }),
+    chatModel: "openai-fast",
+    visionModel: "openai",
+    supportsTools: false,
+    tokenParam: "max_tokens",
+  });
+
+  return providers;
+}
+
+const AI_PROVIDERS = buildProviders();
+// Track which provider is active (persists across requests for the session)
+let activeProviderIndex = 0;
+
+function isBillingError(err: any): boolean {
+  const msg: string = (err?.message || String(err)).toLowerCase();
+  const code: string = (err?.code || err?.error?.code || "").toLowerCase();
+  return (
+    err?.status === 402 ||
+    code === "insufficient_quota" ||
+    msg.includes("insufficient_quota") ||
+    msg.includes("exceeded your current quota") ||
+    msg.includes("billing") ||
+    msg.includes("no credits") ||
+    msg.includes("debit") ||
+    msg.includes("hard limit") ||
+    (err?.status === 429 && (msg.includes("quota") || msg.includes("billing")))
+  );
+}
+
+function isRateLimitError(err: any): boolean {
+  const msg: string = (err?.message || String(err)).toLowerCase();
+  return (
+    err?.status === 429 &&
+    !isBillingError(err) &&
+    (msg.includes("rate limit") || msg.includes("rate_limit") || msg.includes("429"))
+  );
+}
+
+function getActiveProvider(): AIProvider {
+  return AI_PROVIDERS[activeProviderIndex] ?? AI_PROVIDERS[0];
+}
+
+// Auto-reset: every 30 min try OpenAI again (in case user added credits)
+let lastProviderSwitchTime = 0;
+setInterval(() => {
+  if (activeProviderIndex > 0) {
+    const minutesSinceSwitch = (Date.now() - lastProviderSwitchTime) / 60000;
+    if (minutesSinceSwitch >= 30) {
+      console.log("[NOVA] Auto-reset: retrying OpenAI after 30 min...");
+      activeProviderIndex = 0;
+    }
+  }
+}, 5 * 60 * 1000); // check every 5 minutes
+
 const execAsync = promisify(exec);
 const router: IRouter = Router();
 const WORKSPACE = "/home/runner/workspace";
+
+// ── Provider status endpoint ───────────────────────────────────────────────────
+router.get("/asistente/providers", (_req, res) => {
+  res.json({
+    active: AI_PROVIDERS[activeProviderIndex]?.name ?? "none",
+    activeIndex: activeProviderIndex,
+    providers: AI_PROVIDERS.map((p, i) => ({
+      index: i,
+      name: p.name,
+      chatModel: p.chatModel,
+      visionModel: p.visionModel,
+      supportsTools: p.supportsTools,
+      isActive: i === activeProviderIndex,
+      status: i < activeProviderIndex ? "billing_error" : i === activeProviderIndex ? "active" : "standby",
+    })),
+  });
+});
+
+// Allow manual provider switch/reset via POST
+router.post("/asistente/providers/reset", (_req, res) => {
+  activeProviderIndex = 0;
+  lastProviderSwitchTime = 0;
+  res.json({ ok: true, message: "Providers reset — OpenAI will be tried first again." });
+});
 
 // ── Reglas ────────────────────────────────────────────────────────────────────
 router.get("/asistente/reglas", async (req, res) => {
@@ -1689,53 +1892,92 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
       // Without this, 10+ screenshots = 15-20 MB of base64 = token limit exceeded = silent task death.
       const trimmedMsgs = trimOldScreenshots(msgs);
 
-      // ── OpenAI call with auto-retry on 429 rate limit ────────────────────────
+      // ── AI call with multi-provider fallback + rate-limit retry ─────────────
       let stream: any;
-      const MAX_API_RETRIES = 6;
+      const MAX_RATE_RETRIES = 4;
       let msgsForCall = trimmedMsgs;
-      for (let attempt = 0; attempt <= MAX_API_RETRIES; attempt++) {
-        try {
-          stream = await openai.chat.completions.create({
-            model: attempt >= 2 ? "gpt-4o-mini" : finalModel, // degrade to mini on 3rd+ retry to save tokens
-            max_completion_tokens: attempt >= 2 ? 2048 : finalMaxTokens,
-            messages: msgsForCall,
-            tools: ACTIVE_TOOLS,
-            tool_choice: opts.forceTool ? "required" as const : "auto" as const,
-            stream: true,
-          });
-          break; // success
-        } catch (apiErr: any) {
-          const errMsg: string = apiErr?.message || String(apiErr);
-          const is429 = errMsg.includes("429") || errMsg.includes("Rate limit") || errMsg.includes("rate_limit") || apiErr?.status === 429;
+      let callSuccess = false;
 
-          if (is429 && attempt < MAX_API_RETRIES) {
-            // Extract exact wait time from OpenAI error message
-            const msMatch = errMsg.match(/try again in (\d+)ms/);
-            const sMatch  = errMsg.match(/try again in ([\d.]+)s/);
-            let waitMs = Math.min(5000 * (attempt + 1), 30000); // backoff: 5s, 10s, 15s… max 30s
-            if (msMatch) waitMs = Math.max(parseInt(msMatch[1]) + 500, waitMs);
-            else if (sMatch) waitMs = Math.max(Math.ceil(parseFloat(sMatch[1]) * 1000) + 500, waitMs);
+      while (!callSuccess) {
+        const provider = getActiveProvider();
+        const needsVision = !!(autoScreenBase64 || hasUserImage);
+        const providerModel = needsVision && provider.supportsTools ? provider.visionModel : provider.chatModel;
+        const selectedModel = needsVision ? providerModel : (finalModel === "gpt-4o" ? provider.visionModel : provider.chatModel);
 
-            // On 2nd+ retry: trim context more aggressively to reduce token usage
-            if (attempt >= 1) {
-              msgsForCall = trimOldScreenshots(msgsForCall);
-              // Keep only last 12 messages + system prompt to reduce context size
-              const systemMsgs = msgsForCall.filter((m: any) => m.role === "system");
-              const nonSystem = msgsForCall.filter((m: any) => m.role !== "system");
-              msgsForCall = [...systemMsgs, ...nonSystem.slice(-12)];
+        for (let attempt = 0; attempt <= MAX_RATE_RETRIES; attempt++) {
+          try {
+            const callParams: any = {
+              model: selectedModel,
+              messages: msgsForCall,
+              stream: true,
+              ...(provider.tokenParam === "max_completion_tokens"
+                ? { max_completion_tokens: attempt >= 2 ? 2048 : finalMaxTokens }
+                : { max_tokens: attempt >= 2 ? 2048 : Math.min(finalMaxTokens, 8000) }
+              ),
+            };
+
+            // Only add tools if provider supports them
+            if (provider.supportsTools && ACTIVE_TOOLS.length > 0) {
+              callParams.tools = ACTIVE_TOOLS;
+              callParams.tool_choice = opts.forceTool ? "required" : "auto";
             }
 
-            sse({ tipo: "status", contenido: `⏳ Límite de API — esperando ${(waitMs / 1000).toFixed(0)}s y reintento (${attempt + 1}/${MAX_API_RETRIES})...` });
-            await new Promise(r => setTimeout(r, waitMs));
-            continue;
-          }
+            stream = await provider.client.chat.completions.create(callParams);
+            callSuccess = true;
+            break;
 
-          // Non-retryable error or retries exhausted
-          req.log.error({ apiErr }, "OpenAI API error in streamAndCollect");
-          const aviso = `\n\n⛔ Límite de API alcanzado después de ${attempt} reintentos. Espera unos segundos y dime "continúa" para reintentar.`;
-          fullContent += aviso;
-          sse({ tipo: "token", contenido: aviso });
-          return;
+          } catch (apiErr: any) {
+            req.log.error({ apiErr, provider: provider.name }, "AI provider error");
+
+            if (isBillingError(apiErr)) {
+              // Switch to next provider permanently
+              if (activeProviderIndex < AI_PROVIDERS.length - 1) {
+                activeProviderIndex++;
+                lastProviderSwitchTime = Date.now();
+                const next = AI_PROVIDERS[activeProviderIndex];
+                sse({ tipo: "status", contenido: `⚡ Cambiando a ${next.name} (gratis) — continuando sin interrupciones...` });
+                break; // break retry loop, outer while will retry with new provider
+              } else {
+                // All providers exhausted
+                const aviso = `\n\n⛔ Balance agotado en todos los proveedores de IA. Por favor recarga OpenAI o agrega una API key de Groq/OpenRouter en la configuración.`;
+                fullContent += aviso;
+                sse({ tipo: "token", contenido: aviso });
+                return;
+              }
+            }
+
+            if (isRateLimitError(apiErr) && attempt < MAX_RATE_RETRIES) {
+              const errMsg: string = apiErr?.message || String(apiErr);
+              const msMatch = errMsg.match(/try again in (\d+)ms/);
+              const sMatch  = errMsg.match(/try again in ([\d.]+)s/);
+              let waitMs = Math.min(4000 * (attempt + 1), 20000);
+              if (msMatch) waitMs = Math.max(parseInt(msMatch[1]) + 500, waitMs);
+              else if (sMatch) waitMs = Math.max(Math.ceil(parseFloat(sMatch[1]) * 1000) + 500, waitMs);
+
+              if (attempt >= 1) {
+                msgsForCall = trimOldScreenshots(msgsForCall);
+                const systemMsgs = msgsForCall.filter((m: any) => m.role === "system");
+                const nonSystem = msgsForCall.filter((m: any) => m.role !== "system");
+                msgsForCall = [...systemMsgs, ...nonSystem.slice(-12)];
+              }
+              sse({ tipo: "status", contenido: `⏳ Límite de velocidad en ${provider.name} — esperando ${(waitMs / 1000).toFixed(0)}s... (${attempt + 1}/${MAX_RATE_RETRIES})` });
+              await new Promise(r => setTimeout(r, waitMs));
+              continue;
+            }
+
+            // Unknown error — try next provider
+            if (activeProviderIndex < AI_PROVIDERS.length - 1) {
+              activeProviderIndex++;
+              const next = AI_PROVIDERS[activeProviderIndex];
+              sse({ tipo: "status", contenido: `⚡ Error en ${provider.name} — cambiando a ${next.name}...` });
+              break;
+            }
+
+            const aviso = `\n\n⛔ Error de API después de ${attempt} reintentos. Dime "continúa" para reintentar.`;
+            fullContent += aviso;
+            sse({ tipo: "token", contenido: aviso });
+            return;
+          }
         }
       }
 
