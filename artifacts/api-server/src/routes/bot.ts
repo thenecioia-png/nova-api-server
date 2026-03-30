@@ -11,12 +11,35 @@ const router: IRouter = Router();
 // Where we save the latest screenshot PNG on disk
 const SCREENSHOT_PATH = path.join("/tmp", "nova_last_screenshot.png");
 
+// ─── In-memory fallback (used when DATABASE_URL is not set) ───────────────
+const DB_AVAILABLE = !!process.env.DATABASE_URL;
+
+// The known hardcoded bot API key (always accepted as fallback)
+const FALLBACK_BOT_KEY = "3a41524bae3a863463e1b8c80332175ac8fdfcee269720a3fb2d145e54854d88";
+
+interface MemSession { id: number; apiKey: string; nombre: string; ultimaConexion: Date; activo: string; }
+interface MemCommand { id: number; tipo: string; payload: any; estado: string; resultado: any; creadoEn: Date; ejecutadoEn: Date | null; }
+
+const memSessions = new Map<string, MemSession>();
+const memCommands = new Map<number, MemCommand>();
+let memCommandCounter = 1;
+let memBotLastSeen: Date | null = null;
+let memBotName = "BOT-PC";
+
+// Pre-seed the fallback session
+memSessions.set(FALLBACK_BOT_KEY, { id: 1, apiKey: FALLBACK_BOT_KEY, nombre: "BOT-PC", ultimaConexion: new Date(0), activo: "si" });
+
 // ─── Bot registration / auth ───────────────────────────────────────────────
 
 router.post("/bot/register", async (req, res) => {
   try {
     const { nombre } = req.body as { nombre?: string };
     const apiKey = crypto.randomBytes(32).toString("hex");
+    if (!DB_AVAILABLE) {
+      const sess: MemSession = { id: memSessions.size + 1, apiKey, nombre: nombre ?? "BOT-PC", ultimaConexion: new Date(0), activo: "si" };
+      memSessions.set(apiKey, sess);
+      return res.json({ apiKey, mensaje: "Bot registrado (modo memoria)." });
+    }
     const [session] = await db
       .insert(botSessionsTable)
       .values({ apiKey, nombre: nombre ?? "BOT-PC" })
@@ -33,30 +56,59 @@ router.post("/bot/register", async (req, res) => {
 async function verifyBot(req: any, res: any, next: any) {
   const apiKey = req.headers["x-bot-api-key"] as string;
   if (!apiKey) return res.status(401).json({ error: "API key requerida" });
-  const [session] = await db
-    .select()
-    .from(botSessionsTable)
-    .where(eq(botSessionsTable.apiKey, apiKey))
-    .limit(1);
-  if (!session) return res.status(401).json({ error: "API key inválida" });
-  await db
-    .update(botSessionsTable)
-    .set({ ultimaConexion: new Date(), activo: "si" })
-    .where(eq(botSessionsTable.id, session.id));
-  req.botSession = session;
-  next();
+
+  if (!DB_AVAILABLE) {
+    const sess = memSessions.get(apiKey);
+    if (!sess) return res.status(401).json({ error: "API key inválida" });
+    sess.ultimaConexion = new Date();
+    memBotLastSeen = new Date();
+    memBotName = sess.nombre;
+    req.botSession = sess;
+    return next();
+  }
+
+  try {
+    const [session] = await db
+      .select()
+      .from(botSessionsTable)
+      .where(eq(botSessionsTable.apiKey, apiKey))
+      .limit(1);
+    if (!session) return res.status(401).json({ error: "API key inválida" });
+    await db
+      .update(botSessionsTable)
+      .set({ ultimaConexion: new Date(), activo: "si" })
+      .where(eq(botSessionsTable.id, session.id));
+    req.botSession = session;
+    next();
+  } catch {
+    // DB error — try memory fallback
+    const sess = memSessions.get(apiKey);
+    if (!sess) return res.status(401).json({ error: "API key inválida (DB error)" });
+    sess.ultimaConexion = new Date();
+    memBotLastSeen = new Date();
+    req.botSession = sess;
+    next();
+  }
 }
 
 // ─── Bot polls for pending commands ───────────────────────────────────────
 
 router.get("/bot/commands/pending", verifyBot, async (req, res) => {
+  if (!DB_AVAILABLE) {
+    const now = Date.now();
+    // Expire stale commands (>3 min)
+    for (const [id, cmd] of memCommands) {
+      if (cmd.estado === "pendiente" && now - cmd.creadoEn.getTime() > 180_000) {
+        cmd.estado = "error"; cmd.resultado = { error: "Expirado" };
+      }
+    }
+    const pending = [...memCommands.values()].filter(c => c.estado === "pendiente").slice(0, 5);
+    return res.json({ comandos: pending });
+  }
   try {
-    // Clean up stale "pendiente" commands older than 3 minutes — prevents
-    // the bot from re-executing leftover commands from a previous session.
     await db.execute(
       drizzleSql`UPDATE bot_commands SET estado = 'error', resultado = '{"error":"Expirado - sesion anterior"}'::jsonb WHERE estado = 'pendiente' AND creado_en < NOW() - INTERVAL '3 minutes'`
     );
-
     const commands = await db
       .select()
       .from(botCommandsTable)
@@ -89,26 +141,21 @@ router.post("/bot/commands/:id/resultado", verifyBot, async (req, res) => {
       try {
         const buf = Buffer.from(resultado.imagen_b64, "base64");
         fs.writeFileSync(SCREENSHOT_PATH, buf);
-        // Store only metadata in DB — not the huge base64
-        dbResultado = {
-          ok: resultado.ok,
-          ancho: resultado.ancho,
-          alto: resultado.alto,
-          screenshot_saved: true,
-          guardadoEn: new Date().toISOString(),
-        };
+        dbResultado = { ok: resultado.ok, ancho: resultado.ancho, alto: resultado.alto, screenshot_saved: true, guardadoEn: new Date().toISOString() };
       } catch (e) {
         req.log.warn({ e }, "No se pudo guardar el screenshot en disco");
       }
     }
 
+    if (!DB_AVAILABLE) {
+      const cmd = memCommands.get(id);
+      if (cmd) { cmd.estado = estado; cmd.resultado = dbResultado; cmd.ejecutadoEn = new Date(); }
+      return res.json({ ok: true });
+    }
+
     await db
       .update(botCommandsTable)
-      .set({
-        estado,
-        resultado: dbResultado as any,
-        ejecutadoEn: new Date(),
-      })
+      .set({ estado, resultado: dbResultado as any, ejecutadoEn: new Date() })
       .where(eq(botCommandsTable.id, id));
 
     res.json({ ok: true });
@@ -133,6 +180,12 @@ router.get("/bot/last-screenshot", (req, res) => {
 // ─── Cancel all pending commands (Abandonar misión) ───────────────────────
 
 router.delete("/bot/commands/pendientes", async (_req, res) => {
+  if (!DB_AVAILABLE) {
+    for (const cmd of memCommands.values()) {
+      if (cmd.estado === "pendiente") { cmd.estado = "error"; cmd.resultado = { error: "Misión abandonada" }; }
+    }
+    return res.json({ ok: true, mensaje: "Todos los comandos pendientes cancelados." });
+  }
   try {
     await db
       .update(botCommandsTable)
@@ -140,7 +193,6 @@ router.delete("/bot/commands/pendientes", async (_req, res) => {
       .where(eq(botCommandsTable.estado, "pendiente"));
     res.json({ ok: true, mensaje: "Todos los comandos pendientes cancelados." });
   } catch (err) {
-    req.log?.error?.({ err }, "Error cancelando comandos");
     res.status(500).json({ error: "Error interno" });
   }
 });
@@ -154,6 +206,14 @@ router.post("/bot/commands", async (req, res) => {
       payload: Record<string, unknown>;
     };
     if (!tipo) return res.status(400).json({ error: "Tipo requerido" });
+
+    if (!DB_AVAILABLE) {
+      const id = memCommandCounter++;
+      const cmd: MemCommand = { id, tipo, payload: payload ?? {}, estado: "pendiente", resultado: null, creadoEn: new Date(), ejecutadoEn: null };
+      memCommands.set(id, cmd);
+      return res.status(201).json(cmd);
+    }
+
     const [cmd] = await db
       .insert(botCommandsTable)
       .values({ tipo, payload: payload ?? {} })
@@ -168,10 +228,13 @@ router.post("/bot/commands", async (req, res) => {
 // ─── Get results for specific command IDs ─────────────────────────────────
 
 router.get("/bot/commands/results", async (req, res) => {
+  const rawIds = String(req.query.ids ?? "");
+  const ids = rawIds.split(",").map(Number).filter(n => !isNaN(n) && n > 0);
+  if (ids.length === 0) return res.json({ commands: [] });
+  if (!DB_AVAILABLE) {
+    return res.json({ commands: ids.map(id => memCommands.get(id)).filter(Boolean) });
+  }
   try {
-    const rawIds = String(req.query.ids ?? "");
-    const ids = rawIds.split(",").map(Number).filter(n => !isNaN(n) && n > 0);
-    if (ids.length === 0) return res.json({ commands: [] });
     const commands = await db.select().from(botCommandsTable).where(inArray(botCommandsTable.id, ids));
     res.json({ commands });
   } catch (err) {
@@ -183,6 +246,11 @@ router.get("/bot/commands/results", async (req, res) => {
 // ─── Get all recent commands ───────────────────────────────────────────────
 
 router.get("/bot/commands", async (req, res) => {
+  if (!DB_AVAILABLE) {
+    const limit = Math.min(parseInt(String(req.query.limit ?? "50"), 10), 200);
+    const cmds = [...memCommands.values()].slice(-limit);
+    return res.json({ comandos: cmds });
+  }
   try {
     const limit = Math.min(parseInt(String(req.query.limit ?? "50"), 10), 200);
     const commands = await db
@@ -199,8 +267,18 @@ router.get("/bot/commands", async (req, res) => {
 // ─── Bot online status ────────────────────────────────────────────────────
 
 router.get("/bot/status", async (req, res) => {
+  if (!DB_AVAILABLE) {
+    const lastSeen = memBotLastSeen?.getTime() ?? 0;
+    const secsAgo = (Date.now() - lastSeen) / 1000;
+    return res.json({
+      online: secsAgo < 45,
+      nombre: memBotName,
+      ultimaConexion: memBotLastSeen,
+      segsDesdeConexion: Math.round(secsAgo),
+      hasScreenshot: fs.existsSync(SCREENSHOT_PATH),
+    });
+  }
   try {
-    // Use the MOST RECENTLY active session (desc by ultimaConexion)
     const sessions = await db
       .select()
       .from(botSessionsTable)
@@ -214,8 +292,6 @@ router.get("/bot/status", async (req, res) => {
     const secsAgo = (Date.now() - lastSeen) / 1000;
     const hasScreenshot = fs.existsSync(SCREENSHOT_PATH);
 
-    // 45s threshold: bot polls every 2s (commands) + heartbeat every 20s
-    // 45s gives plenty of margin for slow networks / Replit hibernation
     res.json({
       online: secsAgo < 45,
       nombre: session.nombre,
@@ -229,13 +305,14 @@ router.get("/bot/status", async (req, res) => {
 });
 
 // ─── Get current config (key + server URL) ────────────────────────────────
-// The bot page calls this on load so the user always sees the existing key.
 
 router.get("/bot/config", async (req, res) => {
+  if (!DB_AVAILABLE) {
+    return res.json({ apiKey: FALLBACK_BOT_KEY, created: false });
+  }
   try {
     const sessions = await db.select().from(botSessionsTable).orderBy(asc(botSessionsTable.id)).limit(1);
     if (sessions.length === 0) {
-      // Auto-create a session; use epoch 0 for ultimaConexion so bot shows OFFLINE until real connection
       const apiKey = crypto.randomBytes(32).toString("hex");
       const [s] = await db.insert(botSessionsTable).values({ apiKey, nombre: "BOT-PC", ultimaConexion: new Date(0) }).returning();
       return res.json({ apiKey: s.apiKey, created: true });
@@ -249,6 +326,13 @@ router.get("/bot/config", async (req, res) => {
 // ─── Generate / regenerate API key ────────────────────────────────────────
 
 router.post("/bot/regenerar-key", async (req, res) => {
+  if (!DB_AVAILABLE) {
+    const apiKey = crypto.randomBytes(32).toString("hex");
+    const sess: MemSession = { id: 1, apiKey, nombre: "BOT-PC", ultimaConexion: new Date(0), activo: "si" };
+    memSessions.clear();
+    memSessions.set(apiKey, sess);
+    return res.json({ apiKey });
+  }
   try {
     const sessions = await db.select().from(botSessionsTable).limit(1);
     const apiKey = crypto.randomBytes(32).toString("hex");
@@ -289,15 +373,28 @@ async function verifyBotFast(req: any, res: any, next: any) {
   const now = Date.now();
   const cached = apiKeyCache.get(apiKey);
   if (cached && cached > now) return next();
-  // Not in cache — validate against DB
-  const [session] = await db
-    .select()
-    .from(botSessionsTable)
-    .where(eq(botSessionsTable.apiKey, apiKey))
-    .limit(1);
-  if (!session) return res.status(401).json({ error: "API key inválida" });
-  apiKeyCache.set(apiKey, now + API_KEY_TTL_MS);
-  next();
+
+  if (!DB_AVAILABLE) {
+    if (!memSessions.has(apiKey)) return res.status(401).json({ error: "API key inválida" });
+    apiKeyCache.set(apiKey, now + API_KEY_TTL_MS);
+    return next();
+  }
+
+  try {
+    const [session] = await db
+      .select()
+      .from(botSessionsTable)
+      .where(eq(botSessionsTable.apiKey, apiKey))
+      .limit(1);
+    if (!session) return res.status(401).json({ error: "API key inválida" });
+    apiKeyCache.set(apiKey, now + API_KEY_TTL_MS);
+    next();
+  } catch {
+    // DB down — try memory
+    if (!memSessions.has(apiKey)) return res.status(401).json({ error: "API key inválida" });
+    apiKeyCache.set(apiKey, now + API_KEY_TTL_MS);
+    next();
+  }
 }
 
 // Bot pushes a JPEG frame (base64) — called ~5-10x per second from bot background thread
@@ -385,12 +482,13 @@ router.post("/bot/heartbeat", verifyBot, async (req, res) => {
 router.post("/bot/error-log", verifyBot, async (req, res) => {
   try {
     const { tipo, error, ts } = req.body as { tipo?: string; error?: string; ts?: string };
-    if (!tipo || !error) return res.json({ ok: true }); // skip malformed
+    if (!tipo || !error) return res.json({ ok: true });
+
+    if (!DB_AVAILABLE) return res.json({ ok: true }); // skip in memory mode
 
     const clave   = `error_bot_${tipo}_${Date.now()}`;
     const valor   = `[${ts ?? new Date().toISOString()}] Comando '${tipo}' falló: ${String(error).slice(0, 400)}`;
 
-    // Keep last 20 error logs — delete oldest if over limit
     const existing = await db
       .select({ id: memoriaTable.id })
       .from(memoriaTable)
@@ -405,7 +503,7 @@ router.post("/bot/error-log", verifyBot, async (req, res) => {
     await db.insert(memoriaTable).values({ clave, valor, categoria: "error_log" });
     res.json({ ok: true });
   } catch {
-    res.json({ ok: true }); // never crash on error logs
+    res.json({ ok: true });
   }
 });
 
@@ -415,26 +513,36 @@ router.get("/health", async (req, res) => {
   const checks: Record<string, string> = {};
 
   // 1. Database
-  try {
-    await db.select().from(botSessionsTable).limit(1);
-    checks.database = "ok";
-  } catch (e: any) {
-    checks.database = `error: ${e.message}`;
+  if (!DB_AVAILABLE) {
+    checks.database = "no_db_url (modo_memoria)";
+  } else {
+    try {
+      await db.select().from(botSessionsTable).limit(1);
+      checks.database = "ok";
+    } catch (e: any) {
+      checks.database = `error: ${e.message}`;
+    }
   }
 
-  // 2. Bot status — is any session active in last 60s?
-  try {
-    const sessions = await db.select().from(botSessionsTable).orderBy(desc(botSessionsTable.ultimaConexion)).limit(1);
-    if (sessions.length === 0) {
-      checks.bot = "sin_sesion";
-    } else {
-      const last = sessions[0].ultimaConexion;
-      const ageMs = last ? Date.now() - new Date(last).getTime() : Infinity;
-      checks.bot      = ageMs < 60_000 ? "online" : `offline_${Math.round(ageMs / 1000)}s_ago`;
-      checks.bot_name = sessions[0].nombre ?? "desconocido";
+  // 2. Bot status
+  if (!DB_AVAILABLE) {
+    const ageMs = memBotLastSeen ? Date.now() - memBotLastSeen.getTime() : Infinity;
+    checks.bot = ageMs < 60_000 ? "online" : `offline_${Math.round(ageMs / 1000)}s_ago`;
+    checks.bot_name = memBotName;
+  } else {
+    try {
+      const sessions = await db.select().from(botSessionsTable).orderBy(desc(botSessionsTable.ultimaConexion)).limit(1);
+      if (sessions.length === 0) {
+        checks.bot = "sin_sesion";
+      } else {
+        const last = sessions[0].ultimaConexion;
+        const ageMs = last ? Date.now() - new Date(last).getTime() : Infinity;
+        checks.bot      = ageMs < 60_000 ? "online" : `offline_${Math.round(ageMs / 1000)}s_ago`;
+        checks.bot_name = sessions[0].nombre ?? "desconocido";
+      }
+    } catch (e: any) {
+      checks.bot = `error: ${e.message}`;
     }
-  } catch (e: any) {
-    checks.bot = `error: ${e.message}`;
   }
 
   // 3. Screenshot freshness
@@ -450,15 +558,19 @@ router.get("/health", async (req, res) => {
     checks.screenshot = "error";
   }
 
-  // 4. OpenAI — via Replit AI integrations proxy (no OPENAI_API_KEY env var needed)
+  // 4. OpenAI
   checks.openai_key = "via_replit_integrations";
 
-  // 5. Pending bot commands
-  try {
-    const pending = await db.select().from(botCommandsTable).where(eq(botCommandsTable.estado, "pendiente"));
-    checks.pending_commands = String(pending.length);
-  } catch {
-    checks.pending_commands = "error";
+  // 5. Pending commands
+  if (!DB_AVAILABLE) {
+    checks.pending_commands = String([...memCommands.values()].filter(c => c.estado === "pendiente").length);
+  } else {
+    try {
+      const pending = await db.select().from(botCommandsTable).where(eq(botCommandsTable.estado, "pendiente"));
+      checks.pending_commands = String(pending.length);
+    } catch {
+      checks.pending_commands = "error";
+    }
   }
 
   const allOk = Object.values(checks).every(v => !v.startsWith("error") && v !== "missing");
