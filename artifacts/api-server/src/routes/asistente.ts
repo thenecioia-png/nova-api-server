@@ -38,7 +38,36 @@ function buildProviders(): AIProvider[] {
     tokenParam: "max_completion_tokens",
   });
 
-  // 2. Groq (free tier — very fast, supports tools + vision)
+  // 2. Pollinations AI — TOTALMENTE GRATIS, SIN KEY, siempre disponible (posición alta para garantía)
+  providers.push({
+    name: "Pollinations AI",
+    client: new OpenAI({
+      apiKey: "free",
+      baseURL: "https://text.pollinations.ai/openai",
+    }),
+    chatModel: "openai-fast",
+    visionModel: "openai",
+    supportsTools: false,
+    tokenParam: "max_tokens",
+  });
+
+  // 3. GitHub Models — GRATIS con GitHub token (ya disponible en env)
+  const ghToken = process.env.GITHUB_TOKEN;
+  if (ghToken) {
+    providers.push({
+      name: "GitHub Models",
+      client: new OpenAI({
+        apiKey: ghToken,
+        baseURL: "https://models.inference.ai.azure.com",
+      }),
+      chatModel: "Meta-Llama-3.1-70B-Instruct",
+      visionModel: "gpt-4o-mini",
+      supportsTools: true,
+      tokenParam: "max_tokens",
+    });
+  }
+
+  // 4. Groq (free tier — very fast, supports tools + vision)
   if (process.env.GROQ_API_KEY) {
     providers.push({
       name: "Groq",
@@ -128,20 +157,6 @@ function buildProviders(): AIProvider[] {
       tokenParam: "max_tokens",
     });
   }
-
-  // 8. Pollinations AI — TOTALMENTE GRATIS, sin API key, siempre disponible
-  // Fuente: https://text.pollinations.ai — funciona sin registrarse
-  providers.push({
-    name: "Pollinations AI",
-    client: new OpenAI({
-      apiKey: "pollinations-free-no-key-needed",
-      baseURL: "https://text.pollinations.ai/openai",
-    }),
-    chatModel: "openai-fast",
-    visionModel: "openai",
-    supportsTools: false,
-    tokenParam: "max_tokens",
-  });
 
   return providers;
 }
