@@ -168,25 +168,33 @@ let activeProviderIndex = 0;
 function isBillingError(err: any): boolean {
   const msg: string = (err?.message || String(err)).toLowerCase();
   const code: string = (err?.code || err?.error?.code || "").toLowerCase();
+  // Treat ALL 429s from OpenAI as billing errors — quota exceeded comes as 429
+  // Also catch 402 (payment required) and explicit quota/billing keywords
   return (
     err?.status === 402 ||
+    err?.response?.status === 402 ||
     code === "insufficient_quota" ||
     msg.includes("insufficient_quota") ||
     msg.includes("exceeded your current quota") ||
+    msg.includes("exceeded your quota") ||
     msg.includes("billing") ||
     msg.includes("no credits") ||
     msg.includes("debit") ||
     msg.includes("hard limit") ||
-    (err?.status === 429 && (msg.includes("quota") || msg.includes("billing")))
+    msg.includes("quota") ||
+    msg.includes("please check your plan") ||
+    // Any 429 from OpenAI domain is likely quota (rate limits are handled separately)
+    (err?.status === 429)
   );
 }
 
 function isRateLimitError(err: any): boolean {
+  // Only classify as rate limit if it explicitly says so AND it's NOT a billing error
+  if (isBillingError(err)) return false;
   const msg: string = (err?.message || String(err)).toLowerCase();
   return (
     err?.status === 429 &&
-    !isBillingError(err) &&
-    (msg.includes("rate limit") || msg.includes("rate_limit") || msg.includes("429"))
+    (msg.includes("rate limit") || msg.includes("rate_limit") || msg.includes("requests per minute") || msg.includes("rpm") || msg.includes("tpm"))
   );
 }
 
@@ -2195,11 +2203,31 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
         const providerModel = needsVision && provider.supportsTools ? provider.visionModel : provider.chatModel;
         const selectedModel = needsVision ? providerModel : (finalModel === "gpt-4o" ? provider.visionModel : provider.chatModel);
 
+        // For free/fallback providers: trim the system prompt to avoid context limit errors
+        // Pollinations AI and similar have much smaller context windows than OpenAI
+        const isPaidProvider = provider.name === "OpenAI";
+        let msgsForThisCall = msgsForCall;
+        if (!isPaidProvider) {
+          msgsForThisCall = msgsForCall.map((m: any) => {
+            if (m.role === "system" && typeof m.content === "string" && m.content.length > 6000) {
+              // Keep first 3000 chars (core identity/tools) + last 2000 chars (recent context)
+              const content = m.content;
+              const trimmed = content.slice(0, 3000) + "\n\n[...instrucciones completas en modo OpenAI...]\n\n" + content.slice(-2000);
+              return { ...m, content: trimmed };
+            }
+            return m;
+          });
+          // Also keep only last 12 conversation turns for free providers
+          const sysMessages = msgsForThisCall.filter((m: any) => m.role === "system");
+          const convMessages = msgsForThisCall.filter((m: any) => m.role !== "system");
+          msgsForThisCall = [...sysMessages, ...convMessages.slice(-12)];
+        }
+
         for (let attempt = 0; attempt <= MAX_RATE_RETRIES; attempt++) {
           try {
             const callParams: any = {
               model: selectedModel,
-              messages: msgsForCall,
+              messages: msgsForThisCall,
               stream: true,
               ...(provider.tokenParam === "max_completion_tokens"
                 ? { max_completion_tokens: attempt >= 2 ? 2048 : finalMaxTokens }
@@ -2230,9 +2258,10 @@ NUNCA repitas exactamente la misma secuencia de acciones que acabas de hacer. Es
                 break; // break retry loop, outer while will retry with new provider
               } else {
                 // All providers exhausted
-                const aviso = `\n\n⛔ Balance agotado en todos los proveedores de IA. Por favor recarga OpenAI o agrega una API key de Groq/OpenRouter en la configuración.`;
+                const aviso = `\n\n⛔ **Sin proveedores de IA disponibles**\n\nTu balance de OpenAI se agotó y los proveedores alternativos también están fallando.\n\n**Para resolver esto:**\n1. **Recarga OpenAI** → platform.openai.com/account/billing → Add credits ($5 mínimo)\n2. **O activa GitHub Models gratis** → dile al admin que agregue \`GITHUB_TOKEN\` en Render\n\nUna vez recargado, di "reconecta" para reiniciar.`;
                 fullContent += aviso;
                 sse({ tipo: "token", contenido: aviso });
+                activeProviderIndex = 0; // Reset so OpenAI is tried again on next request
                 return;
               }
             }
