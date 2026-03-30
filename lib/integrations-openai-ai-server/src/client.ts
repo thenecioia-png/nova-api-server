@@ -5,12 +5,10 @@ const proxyKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
 const proxyBase = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
 
 if (!directKey && !proxyKey) {
-  throw new Error(
-    "Set OPENAI_API_KEY (direct OpenAI) or AI_INTEGRATIONS_OPENAI_API_KEY (Replit proxy).",
-  );
+  console.warn("[openai] WARNING: Sin OPENAI_API_KEY ni AI_INTEGRATIONS_OPENAI_API_KEY. OpenAI workspace no disponible — el servidor usará sus propias keys.");
 }
 
 export const openai = new OpenAI({
-  apiKey: directKey ?? proxyKey!,
+  apiKey: directKey ?? proxyKey ?? "no-key-set",
   baseURL: directKey ? undefined : proxyBase,
 });
