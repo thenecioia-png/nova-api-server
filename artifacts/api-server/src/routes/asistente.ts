@@ -280,7 +280,11 @@ function estimateCost(model: string, inputChars: number, outputChars: number): n
   return (inputTokens / 1000) * rates.input + (outputTokens / 1000) * rates.output;
 }
 
-// Endpoint to query cost stats
+const execAsync = promisify(exec);
+const router: IRouter = Router();
+const WORKSPACE = "/home/runner/workspace";
+
+// ── Cost stats endpoint ────────────────────────────────────────────────────────
 router.get("/asistente/costos", (_req, res) => {
   res.json({
     sesion: {
@@ -290,10 +294,6 @@ router.get("/asistente/costos", (_req, res) => {
     },
   });
 });
-
-const execAsync = promisify(exec);
-const router: IRouter = Router();
-const WORKSPACE = "/home/runner/workspace";
 
 // ── Provider status endpoint ───────────────────────────────────────────────────
 router.get("/asistente/providers", (_req, res) => {
